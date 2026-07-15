@@ -1,0 +1,256 @@
+import { useEffect, useState } from "react";
+import { StatusBar } from "react-native";
+import {
+  DefaultTheme,
+  NavigationContainer,
+  Theme,
+} from "@react-navigation/native";
+import { createNativeStackNavigator } from "@react-navigation/native-stack";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import { AddLocationScreen } from "./screens/AddLocationScreen";
+import { ActiveNavigationScreen } from "./screens/ActiveNavigationScreen";
+import { ErrorStateScreen } from "./screens/ErrorStateScreen";
+import { HomeScreen } from "./screens/HomeScreen";
+import { NavigationInputScreen } from "./screens/NavigationInputScreen";
+import { RoutePreviewScreen } from "./screens/RoutePreviewScreen";
+import { SavedLocationsScreen } from "./screens/SavedLocationsScreen";
+import { SearchResultsScreen } from "./screens/SearchResultsScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
+import { VoiceOnlyModeScreen } from "./screens/VoiceOnlyModeScreen";
+import { ArrivalScreen } from "./screens/ArrivalScreen";
+import { useLiveLocation } from "./hooks/useLiveLocation";
+import type {
+  NewSavedLocation,
+  RootStackParamList,
+  SavedLocation,
+} from "./types";
+import { preloadAudioAssets } from "./services/preRecordedAudio";
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+const navTheme: Theme = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    background: "#020617",
+    card: "#020617",
+    border: "transparent",
+    text: "#ffffff",
+    primary: "#22d3ee",
+    notification: "#22d3ee",
+  },
+};
+
+const initialSavedLocations: SavedLocation[] = [
+  {
+    id: "1",
+    name: "Main Library",
+    subtitle: "Near ETF Building",
+    isFavorite: true,
+  },
+  {
+    id: "2",
+    name: "Student Center",
+    subtitle: "Campus Central",
+    isFavorite: true,
+  },
+  {
+    id: "3",
+    name: "My Dorm",
+    subtitle: "Building A, Room 304",
+    isFavorite: false,
+  },
+];
+
+export default function App() {
+  const [savedLocations, setSavedLocations] = useState(initialSavedLocations);
+  const [homeSessionVersion, setHomeSessionVersion] = useState(0);
+  const { currentLocationLabel, currentCoordinates } = useLiveLocation();
+
+  const handleAddLocation = (location: NewSavedLocation) => {
+    const newLocation: SavedLocation = {
+      id: Date.now().toString(),
+      ...location,
+    };
+    setSavedLocations((prev) => [...prev, newLocation]);
+  };
+
+  useEffect(() => {
+    preloadAudioAssets().catch((error) => {
+      console.warn("Failed to preload audio:", error);
+    });
+  }, []);
+
+  return (
+    <SafeAreaProvider>
+      <StatusBar barStyle="light-content" />
+      <NavigationContainer theme={navTheme}>
+        <Stack.Navigator
+          screenOptions={{ headerShown: false, animation: "default" }}
+        >
+          <Stack.Screen name="Home">
+            {({ navigation }) => (
+              <HomeScreen
+                key={`home-session-${homeSessionVersion}`}
+                currentLocation={currentLocationLabel}
+                onStartVoiceNavigation={(destination) =>
+                  navigation.navigate("RoutePreview", { destination })
+                }
+                onOpenSettings={() => navigation.navigate("Settings")}
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="NavigationInput">
+            {({ navigation }) => (
+              <NavigationInputScreen
+                onBack={() => navigation.goBack()}
+                onSelectDestination={(destination) =>
+                  navigation.navigate("RoutePreview", { destination })
+                }
+                onAmbiguousResults={(query) =>
+                  navigation.navigate(
+                    "SearchResults",
+                    query ? { query } : undefined,
+                  )
+                }
+                onShowError={() =>
+                  navigation.navigate("ErrorState", {
+                    message: "I couldn't find that route",
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="SearchResults">
+            {({ navigation, route }) => (
+              <SearchResultsScreen
+                query={route.params?.query}
+                onBack={() => navigation.goBack()}
+                onSelectLocation={(location) =>
+                  navigation.navigate("RoutePreview", { destination: location })
+                }
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="ErrorState">
+            {({ navigation, route }) => (
+              <ErrorStateScreen
+                message={route.params?.message}
+                onBack={() => navigation.goBack()}
+                onTryAgain={() => navigation.navigate("NavigationInput")}
+                onUseSearch={() => navigation.navigate("NavigationInput")}
+                onSelectSuggestion={(suggestion) =>
+                  navigation.navigate("RoutePreview", {
+                    destination: suggestion,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="Settings">
+            {({ navigation }) => (
+              <SettingsScreen
+                onBack={() => navigation.goBack()}
+                onOpenSavedLocations={() =>
+                  navigation.navigate("SavedLocations")
+                }
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="SavedLocations">
+            {({ navigation }) => (
+              <SavedLocationsScreen
+                savedLocations={savedLocations}
+                onBack={() => navigation.goBack()}
+                onSelectLocation={(location) =>
+                  navigation.navigate("RoutePreview", {
+                    destination: location.name,
+                  })
+                }
+                onAddLocation={() => navigation.navigate("AddLocation")}
+                onUpdateLocations={setSavedLocations}
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="AddLocation">
+            {({ navigation }) => (
+              <AddLocationScreen
+                onBack={() => navigation.goBack()}
+                onSave={(location) => {
+                  handleAddLocation(location);
+                  navigation.goBack();
+                }}
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="RoutePreview">
+            {({ navigation, route }) => (
+              <RoutePreviewScreen
+                destination={route.params.destination}
+                duration="5 min walk"
+                distance="350m"
+                currentLocation={currentLocationLabel}
+                currentCoordinate={currentCoordinates}
+                onBack={() => navigation.goBack()}
+                onStartNavigation={() =>
+                  navigation.navigate("ActiveNavigation", {
+                    destination: route.params.destination,
+                  })
+                }
+                onCancelVoiceConfirmation={() => {
+                  setHomeSessionVersion((prev) => prev + 1);
+                  navigation.popToTop();
+                }}
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="ActiveNavigation">
+            {({ navigation, route }) => (
+              <ActiveNavigationScreen
+                destination={route.params.destination}
+                currentLocation={currentLocationLabel}
+                currentCoordinate={currentCoordinates}
+                onEndNavigation={() => navigation.popToTop()}
+                onSwitchToVoiceOnly={() =>
+                  navigation.navigate("VoiceOnlyMode", {
+                    destination: route.params.destination,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="VoiceOnlyMode">
+            {({ navigation, route }) => (
+              <VoiceOnlyModeScreen
+                destination={route.params.destination}
+                currentLocation={currentLocationLabel}
+                currentCoordinate={currentCoordinates}
+                onEndNavigation={() => navigation.popToTop()}
+              />
+            )}
+          </Stack.Screen>
+
+          <Stack.Screen name="Arrival">
+            {({ navigation, route }) => (
+              <ArrivalScreen
+                destination={route.params.destination}
+                durationSeconds={route.params.durationSeconds}
+                distanceMeters={route.params.distanceMeters}
+                onFinish={() => navigation.popToTop()}
+              />
+            )}
+          </Stack.Screen>
+        </Stack.Navigator>
+      </NavigationContainer>
+    </SafeAreaProvider>
+  );
+}
