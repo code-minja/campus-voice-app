@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { Mic, Smartphone, Square, Play, Pause, RotateCcw, ArrowLeft, ArrowRight } from "lucide-react-native";
+import { Mic, Smartphone, Square } from "lucide-react-native";
 import { speakToUser, clearSpeechQueue, prefetchAudio } from "../services/voiceFeedback";
 import { cleanAccessibilityInstruction } from "./RoutePreviewScreen";
 import { fetchRouteFromBackend, type RoutePayload } from "../services/navigationRoute";
@@ -9,6 +9,11 @@ import type { GeoCoordinates } from "../types";
 import { useNavigation } from "@react-navigation/native";
 import { type NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { type RootStackParamList } from "../types";
+import {
+  measureRouteProgress,
+  NAVIGATION_TRACKING_CONFIG,
+} from "../services/routeTracking";
+import { useVoiceNavigation } from "../hooks/useVoiceNavigation";
 
 type VoiceState = "listening" | "speaking" | "idle";
 
@@ -16,6 +21,7 @@ type VoiceOnlyModeScreenProps = {
   destination: string;
   currentLocation: string;
   currentCoordinate?: GeoCoordinates;
+  locationAccuracyMeters?: number;
   onEndNavigation: () => void;
 };
 
@@ -46,81 +52,100 @@ function toMeters(a: GeoCoordinates, b: { latitude: number; longitude: number })
   return R * c;
 }
 
-function snapToRoute(coordinate: GeoCoordinates, polyline: { latitude: number; longitude: number }[]): GeoCoordinates {
-  if (!polyline || polyline.length === 0) return coordinate;
-
-  let nearestPoint = polyline[0];
-  let minDistance = Number.POSITIVE_INFINITY;
-
-  polyline.forEach((point) => {
-    const d = toMeters(coordinate, point);
-    if (d < minDistance) {
-      minDistance = d;
-      nearestPoint = point;
-    }
-  });
-
-  if (minDistance < 25) {
-    return {
-      latitude: nearestPoint.latitude,
-      longitude: nearestPoint.longitude,
-    };
-  }
-
-  return coordinate;
-}
-
 export function VoiceOnlyModeScreen({
   destination,
   currentLocation,
   currentCoordinate,
+  locationAccuracyMeters,
   onEndNavigation,
 }: VoiceOnlyModeScreenProps) {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  const {
+    isListening,
+    transcript,
+    handleVoicePress,
+  } = useVoiceNavigation({
+    onStartVoiceNavigation: (nextDestination) => {
+      navigation.navigate("RoutePreview", { destination: nextDestination });
+    },
+  });
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
-  const [isListening, setIsListening] = useState(false);
   const [routePayload, setRoutePayload] = useState<RoutePayload | null>(null);
   const [routeLoadError, setRouteLoadError] = useState("");
+  const [routeRetryCount, setRouteRetryCount] = useState(0);
 
-  // Simulation tracking
-  const [isSimulating, setIsSimulating] = useState(true);
-  const [simulationProgress, setSimulationProgress] = useState(0);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
-  const [simulationSpeedMultiplier, setSimulationSpeedMultiplier] = useState(1);
 
   const lastSpokenStepIndex = useRef<number>(-1);
   const timeoutHandles = useRef<ReturnType<typeof setTimeout>[]>([]);
   const isRecalculatingRef = useRef(false);
+  const routeRequestRef = useRef({ destination: "", started: false });
+  const isMountedRef = useRef(true);
+  const offRouteReadingsRef = useRef(0);
+  const lastRerouteAtRef = useRef(0);
+  const lastAnnouncedRemainingRef = useRef<number | undefined>(undefined);
+  const hasAnnouncedArrivalRef = useRef(false);
 
   // Load route payload
   useEffect(() => {
-    let cancelled = false;
-    if (!destination.trim()) return;
+    if (routeRequestRef.current.destination !== destination) {
+      routeRequestRef.current = { destination, started: false };
+      setRoutePayload(null);
+      setRouteLoadError("");
+      setCurrentStepIndex(0);
+      lastSpokenStepIndex.current = -1;
+      offRouteReadingsRef.current = 0;
+      lastRerouteAtRef.current = 0;
+      lastAnnouncedRemainingRef.current = undefined;
+      hasAnnouncedArrivalRef.current = false;
+    }
+
+    if (
+      !destination.trim() ||
+      !currentCoordinate ||
+      routeRequestRef.current.started
+    ) {
+      return;
+    }
+    routeRequestRef.current.started = true;
 
     void (async () => {
       try {
         setRouteLoadError("");
         const payload = await fetchRouteFromBackend(currentCoordinate, destination);
-        if (!cancelled) {
+        if (
+          isMountedRef.current &&
+          routeRequestRef.current.destination === destination
+        ) {
           setRoutePayload(payload);
           void speakToUser(`Starting voice-only navigation to ${destination}.`);
         }
       } catch (err) {
-        if (!cancelled) {
-          setRouteLoadError(err instanceof Error ? err.message : "Failed to load route");
+        if (
+          isMountedRef.current &&
+          routeRequestRef.current.destination === destination
+        ) {
+          routeRequestRef.current.started = false;
+          const message =
+            err instanceof Error ? err.message : "Failed to load route";
+          setRouteLoadError(message);
+          void speakToUser(message);
         }
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [destination, currentCoordinate]);
+  }, [
+    destination,
+    currentCoordinate?.latitude,
+    currentCoordinate?.longitude,
+    routeRetryCount,
+  ]);
 
   // Clean up timers on unmount
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
       timeoutHandles.current.forEach((h) => clearTimeout(h));
       timeoutHandles.current = [];
       clearSpeechQueue();
@@ -143,62 +168,29 @@ export function VoiceOnlyModeScreen({
     return segmentDistances.reduce((sum, d) => sum + d, 0);
   }, [segmentDistances]);
 
-  const getCoordinateAtDistance = (dist: number): GeoCoordinates => {
-    if (!routePayload?.route_preview?.length) {
-      return { latitude: 0, longitude: 0 };
-    }
-    if (dist <= 0) {
-      return routePayload.route_preview[0];
-    }
-    let accumulated = 0;
-    for (let i = 0; i < segmentDistances.length; i++) {
-      const segD = segmentDistances[i];
-      if (accumulated + segD >= dist) {
-        const remaining = dist - accumulated;
-        const fraction = segD > 0 ? remaining / segD : 0;
-        const start = routePayload.route_preview[i];
-        const end = routePayload.route_preview[i + 1];
-        return {
-          latitude: start.latitude + (end.latitude - start.latitude) * fraction,
-          longitude: start.longitude + (end.longitude - start.longitude) * fraction,
-        };
-      }
-      accumulated += segD;
-    }
-    return routePayload.route_preview[routePayload.route_preview.length - 1];
-  };
-
-  const simulatedCoordinate = useMemo(() => {
-    return getCoordinateAtDistance(simulationProgress);
-  }, [simulationProgress, segmentDistances, routePayload]);
-
   const activeCoordinate = useMemo(() => {
-    if (isSimulating && routePayload?.steps?.length) {
-      if (currentStepIndex <= 0) {
-        return routePayload.origin;
-      }
-      if (currentStepIndex >= routePayload.steps.length) {
-        return routePayload.steps[routePayload.steps.length - 1].waypoint;
-      }
-      return routePayload.steps[currentStepIndex - 1].waypoint;
-    }
+    return currentCoordinate ?? routePayload?.origin;
+  }, [currentCoordinate, routePayload?.origin]);
 
-    const rawCoord = currentCoordinate ?? routePayload?.origin;
-    if (rawCoord && routePayload?.route_preview?.length) {
-      return snapToRoute(rawCoord, routePayload.route_preview);
+  const measuredRouteProgress = useMemo(() => {
+    if (!activeCoordinate || !routePayload?.route_preview?.length) {
+      return undefined;
     }
-    return rawCoord;
-  }, [isSimulating, currentStepIndex, currentCoordinate, routePayload]);
+    return measureRouteProgress(activeCoordinate, routePayload.route_preview);
+  }, [activeCoordinate, routePayload?.route_preview]);
 
-  // Update currentStepIndex in real-life navigation based on snapped GPS location
+  // Update the current instruction based on the live GPS location.
   useEffect(() => {
-    if (isSimulating || !routePayload?.steps?.length || !activeCoordinate) {
+    if (!routePayload?.steps?.length || !activeCoordinate) {
       return;
     }
 
-    let nearestIdx = 0;
+    let nearestIdx = currentStepIndex;
     let nearestDist = Number.POSITIVE_INFINITY;
     routePayload.steps.forEach((step, idx) => {
+      if (idx < currentStepIndex) {
+        return;
+      }
       const d = toMeters(activeCoordinate, step.waypoint);
       if (d < nearestDist) {
         nearestDist = d;
@@ -206,10 +198,16 @@ export function VoiceOnlyModeScreen({
       }
     });
 
-    if (nearestIdx !== currentStepIndex) {
+    if (
+      nearestIdx > currentStepIndex &&
+      toMeters(
+        activeCoordinate,
+        routePayload.steps[currentStepIndex].waypoint,
+      ) < NAVIGATION_TRACKING_CONFIG.stepAnnouncementDistanceMeters
+    ) {
       setCurrentStepIndex(nearestIdx);
     }
-  }, [activeCoordinate, isSimulating, routePayload, currentStepIndex]);
+  }, [activeCoordinate, routePayload, currentStepIndex]);
 
   // Voice steps guidance
   useEffect(() => {
@@ -223,11 +221,13 @@ export function VoiceOnlyModeScreen({
       lastSpokenStepIndex.current = currentStepIndex;
 
       // Prefetch next step audio
-      const nextStep = routePayload.steps[currentStepIndex + 1];
-      if (nextStep) {
-        const nextCleanInstruction = cleanAccessibilityInstruction(nextStep.instruction);
-        void prefetchAudio(nextCleanInstruction);
-      }
+      routePayload.steps
+        .slice(currentStepIndex + 1, currentStepIndex + 3)
+        .forEach((nextStep) =>
+          void prefetchAudio(
+            cleanAccessibilityInstruction(nextStep.instruction),
+          ),
+        );
 
       setVoiceState("speaking");
       const words = cleanInstruction.split(" ").length;
@@ -237,144 +237,128 @@ export function VoiceOnlyModeScreen({
     }
   }, [currentStepIndex, routePayload]);
 
-  const handleNextStep = () => {
-    if (!routePayload?.steps?.length) return;
-
-    // Calculate cumulative distances
-    const stepDistances: number[] = [0];
-    let total = 0;
-    routePayload.steps.forEach((step) => {
-      total += step.distance_meters;
-      stepDistances.push(total);
-    });
-
-    let nextIdx = currentStepIndex + 1;
-    if (nextIdx > routePayload.steps.length) {
+  useEffect(() => {
+    if (!routePayload || !measuredRouteProgress || routePayload.simulated) {
+      lastAnnouncedRemainingRef.current = undefined;
       return;
     }
 
-    setIsSimulating(true);
-    setCurrentStepIndex(nextIdx);
-    const nextProgress = stepDistances[nextIdx];
-    setSimulationProgress(nextProgress);
-
-    if (nextIdx === routePayload.steps.length) {
-      void speakToUser("You have arrived at your destination, " + destination);
-      navigation.navigate("Arrival", {
-        destination,
-        durationSeconds: routePayload.estimated_duration_seconds,
-        distanceMeters: totalDistance,
-      });
+    const remaining = measuredRouteProgress.remainingMeters;
+    const previous = lastAnnouncedRemainingRef.current;
+    if (previous === undefined) {
+      lastAnnouncedRemainingRef.current = remaining;
+    } else if (
+      previous - remaining >=
+      NAVIGATION_TRACKING_CONFIG.announcementIntervalMeters
+    ) {
+      lastAnnouncedRemainingRef.current = remaining;
+      void speakToUser(
+        `About ${Math.max(0, Math.round(remaining))} meters remain to ${destination}.`,
+      );
     }
-  };
+  }, [destination, measuredRouteProgress, routePayload]);
 
-  const handlePrevStep = () => {
-    if (!routePayload?.steps?.length) return;
-
-    // Calculate cumulative distances
-    const stepDistances: number[] = [0];
-    let total = 0;
-    routePayload.steps.forEach((step) => {
-      total += step.distance_meters;
-      stepDistances.push(total);
-    });
-
-    let prevIdx = currentStepIndex - 1;
-    if (prevIdx < 0) {
-      prevIdx = 0;
-    }
-
-    setIsSimulating(prevIdx > 0);
-    setCurrentStepIndex(prevIdx);
-    const prevProgress = stepDistances[prevIdx];
-    setSimulationProgress(prevProgress);
-  };
-
-  // Periodic check-in every 2 minutes (120 seconds) to reassure the user
+  // Arrival detection uses the live GPS location.
   useEffect(() => {
-    if (!routePayload || !activeCoordinate) return;
-
-    const interval = setInterval(() => {
-      const nextStepIndex = currentStepIndex + 1;
-      if (nextStepIndex < routePayload.steps.length) {
-        const nextStep = routePayload.steps[nextStepIndex];
-        const dist = toMeters(activeCoordinate, nextStep.waypoint);
-        const stepsCount = Math.max(1, Math.round(dist / 0.75));
-
-        if (dist < 15) {
-          const cleanInst = cleanAccessibilityInstruction(nextStep.instruction);
-          void speakToUser(`Turn alert: ${cleanInst}`);
-        } else {
-          const feetText = `${Math.round(dist * 3.28)} feet`;
-          void speakToUser(`Keep going straight for another ${feetText} or about ${stepsCount} footsteps.`);
-        }
-      }
-    }, 120000);
-
-    return () => clearInterval(interval);
-  }, [routePayload, activeCoordinate, currentStepIndex, destination]);
-
-  // Real-life arrival detection (when not simulating)
-  useEffect(() => {
-    if (isSimulating || !routePayload || !activeCoordinate || !routePayload?.destination?.coordinate || routePayload.simulated) {
+    if (
+      !routePayload ||
+      !activeCoordinate ||
+      !routePayload.destination.coordinate ||
+      routePayload.simulated ||
+      locationAccuracyMeters === undefined ||
+      locationAccuracyMeters > NAVIGATION_TRACKING_CONFIG.maxGpsAccuracyMeters ||
+      hasAnnouncedArrivalRef.current
+    ) {
       return;
     }
     const destCoord = routePayload.destination.coordinate;
     const dist = toMeters(activeCoordinate, destCoord);
-    if (dist < 15) {
-      void speakToUser("You have arrived at your destination, " + destination);
+    if (dist < NAVIGATION_TRACKING_CONFIG.arrivalRadiusMeters) {
+      hasAnnouncedArrivalRef.current = true;
+      void speakToUser(`You have arrived at your destination, ${destination}.`);
       navigation.navigate("Arrival", {
         destination,
         durationSeconds: routePayload.estimated_duration_seconds,
         distanceMeters: totalDistance,
       });
     }
-  }, [activeCoordinate, isSimulating, routePayload, destination, totalDistance, navigation]);
+  }, [activeCoordinate, routePayload, destination, totalDistance, navigation, locationAccuracyMeters]);
 
   // Find minimum distance to check deviations
   const distanceToRoute = useMemo(() => {
-    if (!routePayload?.route_preview?.length || !activeCoordinate) return 0;
-    let minD = Number.POSITIVE_INFINITY;
-    routePayload.route_preview.forEach((point) => {
-      const d = toMeters(activeCoordinate, point);
-      if (d < minD) {
-        minD = d;
-      }
-    });
-    return minD;
-  }, [routePayload, activeCoordinate]);
+    return measuredRouteProgress?.distanceToRouteMeters ?? 0;
+  }, [measuredRouteProgress]);
 
   // Deviation rerouting
   useEffect(() => {
-    if (isSimulating || routePayload?.simulated || !activeCoordinate || !routePayload) {
+    if (
+      routePayload?.simulated ||
+      !activeCoordinate ||
+      !routePayload ||
+      locationAccuracyMeters === undefined ||
+      locationAccuracyMeters > NAVIGATION_TRACKING_CONFIG.maxGpsAccuracyMeters
+    ) {
+      offRouteReadingsRef.current = 0;
       return;
     }
-    if (distanceToRoute > 20 && !isRecalculatingRef.current) {
+
+    if (distanceToRoute <= NAVIGATION_TRACKING_CONFIG.offRouteThresholdMeters) {
+      offRouteReadingsRef.current = 0;
+      return;
+    }
+
+    offRouteReadingsRef.current += 1;
+    const now = Date.now();
+    if (
+      offRouteReadingsRef.current >=
+        NAVIGATION_TRACKING_CONFIG.offRouteConfirmations &&
+      !isRecalculatingRef.current &&
+      now - lastRerouteAtRef.current >= 5000
+    ) {
+      offRouteReadingsRef.current = 0;
       isRecalculatingRef.current = true;
+      lastRerouteAtRef.current = now;
       void (async () => {
+        const requestStartedAt = Date.now();
         try {
-          await speakToUser("Rerouting... Recalculating path to " + destination);
+          void speakToUser(`You are off route. Recalculating a path to ${destination}.`);
           const newPayload = await fetchRouteFromBackend(activeCoordinate, destination);
-          setRoutePayload(newPayload);
+          if (
+            isMountedRef.current &&
+            routeRequestRef.current.destination === destination
+          ) {
+            setRoutePayload(newPayload);
+            setCurrentStepIndex(0);
+            lastSpokenStepIndex.current = -1;
+            lastAnnouncedRemainingRef.current = undefined;
+          }
+          const elapsedMilliseconds = Date.now() - requestStartedAt;
+          console.info("[navigation] reroute completed", {
+            duration_ms: elapsedMilliseconds,
+            target_ms: NAVIGATION_TRACKING_CONFIG.rerouteTargetMilliseconds,
+            within_target:
+              elapsedMilliseconds <=
+              NAVIGATION_TRACKING_CONFIG.rerouteTargetMilliseconds,
+          });
         } catch (err) {
-          console.warn("Recalculation failed:", err);
+          console.warn("[navigation] reroute failed", {
+            duration_ms: Date.now() - requestStartedAt,
+            error: err instanceof Error ? err.message : "Unknown reroute error",
+          });
+          if (
+            isMountedRef.current &&
+            routeRequestRef.current.destination === destination
+          ) {
+            void speakToUser(
+              "I couldn't recalculate the route. I will try again when your location updates.",
+            );
+          }
         } finally {
           isRecalculatingRef.current = false;
         }
       })();
     }
-  }, [distanceToRoute, activeCoordinate, destination, isSimulating, routePayload]);
-
-  const handleMicTap = () => {
-    setIsListening((prev) => !prev);
-    setVoiceState(isListening ? "idle" : "listening");
-
-    const handle = setTimeout(() => {
-      setIsListening(false);
-      setVoiceState("idle");
-    }, 4000);
-    timeoutHandles.current.push(handle);
-  };
+  }, [distanceToRoute, activeCoordinate, destination, routePayload, locationAccuracyMeters]);
 
   const currentStep = routePayload?.steps?.[currentStepIndex];
 
@@ -401,60 +385,41 @@ export function VoiceOnlyModeScreen({
           <View style={styles.spacer} />
 
           <View style={styles.mainCenter}>
-            <Text style={styles.statusTitle}>{statusText}</Text>
-            <Text style={styles.statusSubtitle}>{subText}</Text>
+            <Text style={styles.statusTitle}>
+              {routeLoadError ? "Route unavailable" : statusText}
+            </Text>
+            <Text style={styles.statusSubtitle}>
+              {routeLoadError || subText}
+            </Text>
+            {!!routeLoadError && (
+              <Pressable
+                onPress={() => setRouteRetryCount((count) => count + 1)}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading route"
+              >
+                <Text style={styles.retryText}>Tap to retry</Text>
+              </Pressable>
+            )}
 
             <View style={styles.indicatorWrap}>{renderStatusIndicator(voiceState)}</View>
 
-            {routePayload && (
-              <View style={styles.miniSimulationCard}>
-                <View style={styles.simControlsRow}>
-                  <Pressable
-                    onPress={handlePrevStep}
-                    style={[styles.simButton, currentStepIndex <= 0 && styles.simButtonDisabled]}
-                    disabled={currentStepIndex <= 0}
-                  >
-                    <ArrowLeft size={14} color="#ffffff" />
-                    <Text style={styles.simButtonText}>Prev Step</Text>
-                  </Pressable>
-
-                  <Pressable
-                    onPress={handleNextStep}
-                    style={styles.simButton}
-                  >
-                    <Text style={styles.simButtonText}>Next Step</Text>
-                    <ArrowRight size={14} color="#ffffff" />
-                  </Pressable>
-
-                  <Pressable
-                    onPress={() => {
-                      setIsSimulating(false);
-                      setSimulationProgress(0);
-                      setCurrentStepIndex(0);
-                      lastSpokenStepIndex.current = -1;
-                      clearSpeechQueue();
-                    }}
-                    style={styles.resetButton}
-                  >
-                    <RotateCcw size={14} color="#cbd5e1" />
-                  </Pressable>
-                </View>
-                <Text style={styles.progressText}>
-                  Step {currentStepIndex + 1} of {routePayload.steps.length}
-                </Text>
-              </View>
-            )}
-
-            <Pressable onPress={handleMicTap} style={({ pressed }) => [styles.micButton, pressed && styles.pressed]}>
+            <Pressable
+              onPress={handleVoicePress}
+              accessibilityRole="button"
+              accessibilityLabel={isListening ? "Listening, tap to stop" : "Speak a new destination"}
+              style={({ pressed }) => [styles.micButton, pressed && styles.pressed]}
+            >
               <Mic size={28} color={isListening ? "#22d3ee" : "#94a3b8"} />
             </Pressable>
-            <Text style={styles.micHint}>Tap to ask a question</Text>
+            <Text style={styles.micHint}>
+              {isListening ? "Listening..." : transcript || "Speak a new destination"}
+            </Text>
           </View>
 
           <View style={styles.bottom}>
             <View style={styles.lockHintWrap}>
               <Smartphone size={14} color="#64748b" />
-              <Text style={styles.lockHintText}>You can lock your screen. Voice will continue.</Text>
+              <Text style={styles.lockHintText}>Keep CampusVoice open for live voice directions.</Text>
             </View>
 
             <Pressable onPress={onEndNavigation} style={({ pressed }) => [styles.stopButton, pressed && styles.pressed]}>
@@ -587,79 +552,6 @@ const styles = StyleSheet.create({
     color: "#64748b",
     fontSize: 12,
   },
-  miniSimulationCard: {
-    width: "100%",
-    backgroundColor: "rgba(30, 41, 59, 0.35)",
-    borderWidth: 1,
-    borderColor: "rgba(51, 65, 85, 0.5)",
-    borderRadius: 16,
-    padding: 12,
-    alignItems: "center",
-    marginVertical: 10,
-  },
-  simControlsRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    width: "100%",
-    gap: 8,
-  },
-  simButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "#0ea5e9",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    minWidth: 80,
-    justifyContent: "center",
-  },
-  simButtonDisabled: {
-    opacity: 0.4,
-  },
-  simButtonText: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  speedSelector: {
-    flexDirection: "row",
-    backgroundColor: "rgba(30, 41, 59, 0.6)",
-    borderRadius: 10,
-    padding: 3,
-  },
-  speedOption: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 8,
-  },
-  speedOptionActive: {
-    backgroundColor: "#1e293b",
-    borderWidth: 1,
-    borderColor: "rgba(51, 65, 85, 0.5)",
-  },
-  speedOptionText: {
-    color: "#64748b",
-    fontSize: 11,
-    fontWeight: "500",
-  },
-  speedOptionTextActive: {
-    color: "#22d3ee",
-  },
-  resetButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(30, 41, 59, 0.6)",
-  },
-  progressText: {
-    color: "#94a3b8",
-    fontSize: 11,
-    marginTop: 8,
-  },
   bottom: {
     marginTop: "auto",
     gap: 16,
@@ -695,6 +587,13 @@ const styles = StyleSheet.create({
     color: "#f87171",
     fontSize: 22,
     fontWeight: "500",
+  },
+  retryText: {
+    color: "#22d3ee",
+    fontSize: 16,
+    fontWeight: "600",
+    textAlign: "center",
+    marginBottom: 12,
   },
   pressed: {
     opacity: 0.84,

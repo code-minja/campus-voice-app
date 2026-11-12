@@ -41,31 +41,16 @@ const navTheme: Theme = {
   },
 };
 
-const initialSavedLocations: SavedLocation[] = [
-  {
-    id: "1",
-    name: "Main Library",
-    subtitle: "Near ETF Building",
-    isFavorite: true,
-  },
-  {
-    id: "2",
-    name: "Student Center",
-    subtitle: "Campus Central",
-    isFavorite: true,
-  },
-  {
-    id: "3",
-    name: "My Dorm",
-    subtitle: "Building A, Room 304",
-    isFavorite: false,
-  },
-];
-
 export default function App() {
-  const [savedLocations, setSavedLocations] = useState(initialSavedLocations);
+  const [savedLocations, setSavedLocations] = useState<SavedLocation[]>([]);
   const [homeSessionVersion, setHomeSessionVersion] = useState(0);
-  const { currentLocationLabel, currentCoordinates } = useLiveLocation();
+  const {
+    currentLocationLabel,
+    currentCoordinates,
+    accuracyMeters,
+    errorMessage: currentLocationError,
+    retryLocation,
+  } = useLiveLocation();
 
   const handleAddLocation = (location: NewSavedLocation) => {
     const newLocation: SavedLocation = {
@@ -108,12 +93,6 @@ export default function App() {
                 onSelectDestination={(destination) =>
                   navigation.navigate("RoutePreview", { destination })
                 }
-                onAmbiguousResults={(query) =>
-                  navigation.navigate(
-                    "SearchResults",
-                    query ? { query } : undefined,
-                  )
-                }
                 onShowError={() =>
                   navigation.navigate("ErrorState", {
                     message: "I couldn't find that route",
@@ -127,6 +106,7 @@ export default function App() {
             {({ navigation, route }) => (
               <SearchResultsScreen
                 query={route.params?.query}
+                currentCoordinate={currentCoordinates}
                 onBack={() => navigation.goBack()}
                 onSelectLocation={(location) =>
                   navigation.navigate("RoutePreview", { destination: location })
@@ -194,10 +174,10 @@ export default function App() {
             {({ navigation, route }) => (
               <RoutePreviewScreen
                 destination={route.params.destination}
-                duration="5 min walk"
-                distance="350m"
                 currentLocation={currentLocationLabel}
                 currentCoordinate={currentCoordinates}
+                locationError={currentLocationError}
+                onRetryLocation={retryLocation}
                 onBack={() => navigation.goBack()}
                 onStartNavigation={() =>
                   navigation.navigate("ActiveNavigation", {
@@ -218,6 +198,7 @@ export default function App() {
                 destination={route.params.destination}
                 currentLocation={currentLocationLabel}
                 currentCoordinate={currentCoordinates}
+                locationAccuracyMeters={accuracyMeters}
                 onEndNavigation={() => navigation.popToTop()}
                 onSwitchToVoiceOnly={() =>
                   navigation.navigate("VoiceOnlyMode", {
@@ -234,6 +215,7 @@ export default function App() {
                 destination={route.params.destination}
                 currentLocation={currentLocationLabel}
                 currentCoordinate={currentCoordinates}
+                locationAccuracyMeters={accuracyMeters}
                 onEndNavigation={() => navigation.popToTop()}
               />
             )}

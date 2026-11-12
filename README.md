@@ -1,6 +1,6 @@
 # 📱 Campus Voice — React Native Expo Mobile Client
 
-An interactive React Native mobile application built with **Expo SDK 54** and **TypeScript**. It serves as the primary front-end interface for the **Campus Voice** voice-guided navigation ecosystem, supporting AAUA (Adekunle Ajasin University, Akungba-Akoko) campus walkways.
+An interactive React Native mobile application built with **Expo SDK 58** and **TypeScript**. It serves as the primary front-end interface for the **Campus Voice** voice-guided navigation ecosystem, supporting AAUA (Adekunle Ajasin University, Akungba-Akoko) campus walkways.
 
 The application captures microphone inputs, transcribes them using the FastAPI backend STT, computes routing tracks, snaps the user to walkways, and provides real-time spoken guidance for hands-free navigation.
 
@@ -9,7 +9,7 @@ The application captures microphone inputs, transcribes them using the FastAPI b
 ## 🛠 Prerequisites
 
 Ensure you have the following installed on your machine:
-- **Node.js** (v18 or higher recommended)
+- **Node.js** (22.13+, 24.3+, or 26+; required by Expo SDK 58)
 - **npm** (comes with Node.js)
 - **Expo Go** app installed on your physical mobile device (Android or iOS) for quick testing, OR local emulators (Android Studio / Xcode).
 - **Docker** (optional, to run the backend in container mode).
@@ -35,6 +35,8 @@ To run:
 ```bash
 npm run dev
 ```
+
+In Windows PowerShell, use `npm.cmd install` and `npm.cmd run dev` if the execution policy blocks the `npm` PowerShell shim.
 
 **Under the hood, this launches `scripts/start-all.js`, which:**
 1. Detects your computer's local network IPv4 address (e.g. `192.168.1.15`).
@@ -88,13 +90,10 @@ When a user says a destination (e.g., *"Take me to the library"* or *"Go to ETF"
 - **Levenshtein Distance**: Measures editing distance on compacted alphanumeric names.
 - **Candidate Phrasing Filters**: Automatically strips out navigation carrier phrases (e.g., *"take me to"*, *"i am going to"*, *"navigate to"*).
 
-If a match score exceeds `0.78`, the coordinate is resolved. Otherwise, the app redirects the user to the `SearchResults` or `ErrorState` screen with suggested matches.
+Matches below `0.78` are rejected and the app asks the user to repeat the destination. If the best candidates are close in confidence, it asks the user to choose one by voice. A confident match is read back for confirmation before route preview.
 
-### 2. Spoken Turn Snapping (`useVoiceNavigation.ts`)
-During active navigation, the app tracks the user's live coordinates. It snaps the user to the generated coordinate path array:
-- Checks if the user is within a small radius of the current step waypoint.
-- Triggers voice announcements for the next navigation instruction (e.g., *"Turn left towards Faculty of Science"*).
-- Detects if the user has drifted off the walkway track, playing an error chime and notifying the user.
+### 2. Live Route Tracking (`routeTracking.ts`)
+The app reads the device's live GPS position, requests a walking route, and tracks perpendicular distance to the nearest polyline segment. It ignores fixes with poor reported accuracy, advances instructions as the user approaches route waypoints, prefetches upcoming speech, and announces progress as distance thresholds are reached. Three consecutive accurate readings more than 5 m off-route trigger an automatic reroute. Arrival is announced once inside the configured radius.
 
 ---
 
@@ -110,3 +109,23 @@ EXPO_PUBLIC_API_BASE_URL=http://192.168.1.15:8000
 EXPO_PUBLIC_TRANSCRIBE_URL=http://192.168.1.15:8000/v1/stt/transcribe
 EXPO_PUBLIC_TTS_URL=http://192.168.1.15:8000/v1/tts/synthesize
 ```
+
+Set `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` in the ignored `.env.local` file to display
+Google Maps on web. Enable Maps JavaScript API and billing in Google Cloud, and
+restrict the key to your app's HTTP referrers. The web app draws the route
+returned by the backend from the device's live location. For native builds,
+provide separate `GOOGLE_MAPS_ANDROID_API_KEY` and
+`GOOGLE_MAPS_IOS_API_KEY` values restricted to the app's package/signing
+certificate and bundle ID, respectively. If these are omitted, native builds
+fall back to `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY`. Rebuild the native app after
+changing native keys. The web map uses satellite imagery and
+`google.maps.marker.AdvancedMarkerElement`; set `EXPO_PUBLIC_GOOGLE_MAPS_MAP_ID`
+to a Map ID from Google Cloud for production (the development default is
+`DEMO_MAP_ID`). The route preview and active navigation calculate arrival time
+from the live route duration and remaining route distance.
+
+Navigation tracking can be tuned in `.env.local` with the optional
+`EXPO_PUBLIC_NAVIGATION_*` settings documented in `.env.example`. The default
+off-route confirmation count is 3, threshold is 5 m, minimum acceptable GPS
+accuracy is 10 m, progress announcement interval is 25 m, and arrival radius
+is 15 m. Restart Expo after changing environment values.

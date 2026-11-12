@@ -34,6 +34,12 @@ export type RoutePayload = {
     center: CoordinatePayload;
     radius_meters: number;
     distance_from_center_meters: number;
+    bounds: {
+      north: number;
+      south: number;
+      east: number;
+      west: number;
+    };
   };
   route_preview: CoordinatePayload[];
   steps: RouteStepPayload[];
@@ -41,29 +47,6 @@ export type RoutePayload = {
   estimated_duration_seconds: number;
   simulated: boolean;
 };
-
-export const AAUA_OBJ_COORDINATE: CoordinatePayload = {
-  latitude: 7.479601,
-  longitude: 5.7394032,
-};
-
-export const SIMULATED_LOCATION_LABEL = "Simulated start: OBJ Multipurpose Hall";
-
-export const shouldForceSimulatedOrigin =
-  process.env.EXPO_PUBLIC_SIMULATE_LOCATION === "true";
-
-export function getEffectiveRouteOrigin(
-  origin?: CoordinatePayload,
-): { origin?: CoordinatePayload; simulate_origin?: CoordinatePayload } {
-  if (shouldForceSimulatedOrigin) {
-    return {
-      origin: origin ?? AAUA_OBJ_COORDINATE,
-      simulate_origin: AAUA_OBJ_COORDINATE,
-    };
-  }
-
-  return origin ? { origin } : {};
-}
 
 export async function fetchRouteFromBackend(
   origin: CoordinatePayload | undefined,
@@ -73,8 +56,8 @@ export async function fetchRouteFromBackend(
     throw new Error(getBackendSetupHint());
   }
 
-  if (!origin && !shouldForceSimulatedOrigin) {
-    throw new Error("Current location is unavailable. Enable simulation or wait for GPS.");
+  if (!origin) {
+    throw new Error("Current location is unavailable. Wait for GPS and try again.");
   }
 
   const destination_name = await resolveCampusLocationName(destination);
@@ -86,7 +69,7 @@ export async function fetchRouteFromBackend(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      ...getEffectiveRouteOrigin(origin),
+      origin,
       destination_id,
       destination_name,
     }),
@@ -102,7 +85,5 @@ export async function fetchRouteFromBackend(
 
 
   const data = (await response.json());
-console.log(data);
-
   return data as RoutePayload;
 }

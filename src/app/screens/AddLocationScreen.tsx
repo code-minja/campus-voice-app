@@ -1,34 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Check, MapPin, Star } from "lucide-react-native";
 import { MapBackground } from "../components/MapBackground";
 import { StackHeader } from "../components/StackHeader";
 import { SuggestionChips } from "../components/SuggestionChips";
-import { VoiceButton } from "../components/VoiceButton";
 import type { NewSavedLocation } from "../types";
+import { getCampusLocations, type CampusLocation } from "../services/campusLocations";
 
 type AddLocationScreenProps = {
   onBack: () => void;
   onSave: (location: NewSavedLocation) => void;
-};
-
-const suggestedLocations = [
-  "Library",
-  "Student Center",
-  "Gym",
-  "Cafeteria",
-  "ETF",
-  "Hostel",
-];
-
-const defaultSubtitles: Record<string, string> = {
-  Library: "Near ETF Building",
-  "Student Center": "Campus Central",
-  Gym: "Sports Complex",
-  Cafeteria: "Main Dining Hall",
-  ETF: "Engineering Building",
-  Hostel: "Student Residence",
 };
 
 export function AddLocationScreen({ onBack, onSave }: AddLocationScreenProps) {
@@ -36,60 +18,54 @@ export function AddLocationScreen({ onBack, onSave }: AddLocationScreenProps) {
   const [locationName, setLocationName] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [isFavorite, setIsFavorite] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [showSuccess, setShowSuccess] = useState(false);
-  const timeoutHandles = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const [locations, setLocations] = useState<CampusLocation[]>([]);
+  const [locationsError, setLocationsError] = useState("");
 
-  const clearTimeouts = () => {
-    timeoutHandles.current.forEach((h) => clearTimeout(h));
-    timeoutHandles.current = [];
-  };
-
-  const isValid = locationName.trim().length > 0;
+  const normalizeName = (value: string) =>
+    value.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
+  const selectedLocation = locations.find((location) =>
+    [location.name, ...location.aliases].some(
+      (name) => normalizeName(name) === normalizeName(locationName),
+    ),
+  );
+  const isValid = Boolean(selectedLocation);
 
   useEffect(() => {
+    let cancelled = false;
+    void getCampusLocations()
+      .then((result) => {
+        if (!cancelled) {
+          setLocations(result);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLocationsError(
+            error instanceof Error
+              ? error.message
+              : "Unable to load campus destinations.",
+          );
+        }
+      });
     return () => {
-      clearTimeouts();
+      cancelled = true;
     };
   }, []);
 
-  const handleVoice = () => {
-    clearTimeouts();
-
-    if (isListening) {
-      setIsListening(false);
-      return;
-    }
-
-    setIsListening(true);
-    const handle = setTimeout(() => {
-      setLocationName("Main Library");
-      setSubtitle("Near ETF Building");
-      setIsListening(false);
-    }, 2000);
-    timeoutHandles.current.push(handle);
-  };
-
   const handleSuggestion = (suggestion: string) => {
     setLocationName(suggestion);
-    setSubtitle(defaultSubtitles[suggestion] ?? "Campus location");
   };
 
   const handleSave = () => {
-    if (!isValid) {
+    if (!selectedLocation) {
       return;
     }
 
-    setShowSuccess(true);
-    const handle = setTimeout(() => {
-      onSave({
-        name: locationName.trim(),
-        subtitle: subtitle.trim() || "Campus location",
-        isFavorite,
-      });
-      setShowSuccess(false);
-    }, 700);
-    timeoutHandles.current.push(handle);
+    onSave({
+      name: selectedLocation.name,
+      subtitle: subtitle.trim() || "AAUA campus destination",
+      isFavorite,
+    });
   };
 
   return (
@@ -102,36 +78,34 @@ export function AddLocationScreen({ onBack, onSave }: AddLocationScreenProps) {
         </View>
 
         <View style={styles.content}>
-          {showSuccess && (
-            <View style={styles.successOverlay}>
-              <View style={styles.successIconWrap}>
-                <Check size={40} color="#ffffff" strokeWidth={3} />
-              </View>
-              <Text style={styles.successText}>Location saved!</Text>
-            </View>
-          )}
-
           <Text style={styles.voiceHint}>
-            {isListening ? "Listening for location..." : "Use voice or select from suggestions"}
+            {selectedLocation
+              ? `${selectedLocation.name} is a campus destination`
+              : "Select a destination from the live campus list"}
           </Text>
-          <View style={styles.voiceButtonWrap}>
-            <VoiceButton
-              isListening={isListening}
-              onPress={handleVoice}
-              accessibilityLabel={isListening ? "Listening, tap to stop" : "Tap to capture location by voice"}
-              size={96}
-              iconSize={34}
-            />
-          </View>
 
           <View style={styles.dividerRow}>
             <View style={styles.divider} />
-            <Text style={styles.dividerText}>OR</Text>
+            <Text style={styles.dividerText}>CAMPUS DESTINATIONS</Text>
             <View style={styles.divider} />
           </View>
 
-          <Text style={styles.sectionLabel}>Quick locations</Text>
-          <SuggestionChips suggestions={suggestedLocations} onSuggestionPress={handleSuggestion} />
+          <Text style={styles.sectionLabel}>Choose a valid campus destination</Text>
+          {!!locationsError && (
+            <Text style={styles.requiredText}>{locationsError}</Text>
+          )}
+          {locations.length ? (
+            <SuggestionChips
+              suggestions={locations.map((location) => location.name)}
+              onSuggestionPress={handleSuggestion}
+            />
+          ) : (
+            !locationsError && (
+              <Text style={styles.requiredText}>
+                Loading campus destinations...
+              </Text>
+            )
+          )}
 
           <View style={styles.formWrap}>
             <Text style={styles.inputLabel}>Location Name *</Text>
@@ -139,7 +113,7 @@ export function AddLocationScreen({ onBack, onSave }: AddLocationScreenProps) {
               <TextInput
                 value={locationName}
                 onChangeText={setLocationName}
-                placeholder="e.g., Main Library"
+                placeholder="Choose or enter a campus destination"
                 placeholderTextColor="#64748b"
                 style={styles.input}
               />
@@ -150,7 +124,7 @@ export function AddLocationScreen({ onBack, onSave }: AddLocationScreenProps) {
             <TextInput
               value={subtitle}
               onChangeText={setSubtitle}
-              placeholder="e.g., Near ETF Building"
+              placeholder="Optional description"
               placeholderTextColor="#64748b"
               style={styles.input}
             />
@@ -188,7 +162,11 @@ export function AddLocationScreen({ onBack, onSave }: AddLocationScreenProps) {
               <Check size={18} color="#ffffff" />
               <Text style={styles.saveButtonText}>Save Location</Text>
             </Pressable>
-            {!isValid && <Text style={styles.requiredText}>Location name is required</Text>}
+            {!isValid && locations.length > 0 && (
+              <Text style={styles.requiredText}>
+                Select a destination from the campus list
+              </Text>
+            )}
           </View>
         </View>
       </SafeAreaView>
@@ -208,36 +186,11 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
   },
-  successOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 20,
-    backgroundColor: "rgba(2, 6, 23, 0.83)",
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 18,
-  },
-  successIconWrap: {
-    width: 86,
-    height: 86,
-    borderRadius: 999,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#06b6d4",
-    marginBottom: 10,
-  },
-  successText: {
-    color: "#ffffff",
-    fontSize: 22,
-  },
   voiceHint: {
     textAlign: "center",
     color: "#94a3b8",
     fontSize: 14,
     marginBottom: 8,
-  },
-  voiceButtonWrap: {
-    alignItems: "center",
-    marginBottom: 14,
   },
   dividerRow: {
     flexDirection: "row",

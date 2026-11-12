@@ -65,15 +65,10 @@ The backend is built in **Python 3.11** using the **FastAPI** web framework. Dep
 ### 2.3 Routing Service
 The routing system is coordinated by [service.py](../python-api/campus-voice/src/campus_voice/services/routing/service.py) and is geofenced to the AAUA campus. 
 
-It handles routing through three tiers:
-
-1. **Curated Walkway Routes**:
-   - For specific critical routes (e.g., *Faculty of Computing ➔ University Library*, *ETF 750 ➔ University Library*), the service returns pre-authored coordinates and highly descriptive walking guides to ensure 100% path accuracy on walkways.
-2. **Mock Walkway Graph (Dijkstra)**:
-   - For other campus routes, [mock_provider.py](../python-api/campus-voice/src/campus_voice/services/routing/mock_provider.py) maps the coordinates, snaps the origin to the nearest graph node, runs Dijkstra's algorithm ([dijkstra.py](../python-api/campus-voice/src/campus_voice/services/routing/dijkstra.py)) over a custom AAUA walkway network ([campus_graph.py](../python-api/campus-voice/src/campus_voice/services/routing/campus_graph.py)), and computes relative bearings to emit navigation steps like:
-     * *"Turn right towards Faculty of Science for 45 meters"*
-3. **Google Routes API Provider**:
-   - When `ROUTING_PROVIDER` is set to `google_routes`, [google_routes_provider.py](../python-api/campus-voice/src/campus_voice/services/routing/google_routes_provider.py) queries Google's walking directions matrix. If Google API calls fail, the service automatically falls back to Dijkstra's mock walkway graph.
+Routes use [google_routes_provider.py](../python-api/campus-voice/src/campus_voice/services/routing/google_routes_provider.py)
+by default for Google's walking directions. API failures are surfaced to the
+client; routes are not replaced with curated or mock paths. The Dijkstra mock
+provider remains available only when explicitly selected for testing.
 
 ### 2.4 AAUA Campus Geofencing
 - **Center Coordinate**: Latitude `7.479234`, Longitude `5.748411` (Senate Building area).
@@ -84,7 +79,7 @@ It handles routing through three tiers:
 
 ## 3. Mobile Client (Expo App)
 
-The mobile client is built using **Expo SDK 54**, **React Native**, and **TypeScript**.
+The mobile client is built using **Expo SDK 58**, **React Native 0.88**, and **TypeScript**.
 
 ### 3.1 Key Modules & Logic
 - **Snapping & Distance Engine**: Monitors live location coordinates via `expo-location` and calculates step offsets/bearings using local Levenshtein matching and Jaccard tokens in [campusLocations.ts](src/app/services/campusLocations.ts).
@@ -109,11 +104,13 @@ To make local onboarding simple, the mobile client includes a unified dev orches
 
 ### Running Locally
 To launch both the backend and frontend at once:
-1. Navigate to the mobile app directory: `cd campus-voice`
-2. Run the developer startup command:
+1. Install **Node.js 22.13+, 24.3+, or 26+** (required by Expo SDK 58).
+2. Navigate to the mobile app directory: `cd campus-voice`
+3. Run the developer startup command:
    ```bash
    npm run dev
    ```
+   In Windows PowerShell, use `npm.cmd run dev` if the execution policy blocks the `npm` PowerShell shim.
 
 **What the script does under the hood:**
 1. **Detects the local IPv4 address** on your host network (e.g. `192.168.1.15`).
@@ -130,12 +127,12 @@ To launch both the backend and frontend at once:
 ### Backend Configuration (`python-api/campus-voice/.env`)
 | Variable | Default | Description |
 |---|---|---|
-| `ROUTING_PROVIDER` | `mock` | `mock` (Dijkstra) or `google_routes` |
-| `GOOGLE_MAPS_API_KEY` | *(None)* | Required if using `google_routes` |
+| `ROUTING_PROVIDER` | `google_routes` | Google Routes by default; `mock` is for explicit testing |
+| `GOOGLE_MAPS_API_KEY` | *(None)* | Required for Google Routes |
 | `WHISPER_MODEL_SIZE` | `base` | Model size for faster-whisper (`tiny` to `large-v3`) |
 | `WHISPER_DEVICE` | `cpu` | Hardware logic: `cpu` or `cuda` |
 | `CAMPUS_GEOFENCE_ENABLED` | `true` | Enables AAUA geofence boundary checks |
-| `ALLOW_SIMULATED_ORIGIN` | `true` | Allows coordinate override for developer testing |
+| `ALLOW_SIMULATED_ORIGIN` | `false` | Simulated origins are disabled by default |
 
 ### Mobile App Configuration (`campus-voice/.env`)
 | Variable | Description |
@@ -143,6 +140,10 @@ To launch both the backend and frontend at once:
 | `EXPO_PUBLIC_API_BASE_URL` | Base API endpoint (automatically set by `start-all.js`) |
 | `EXPO_PUBLIC_TRANSCRIBE_URL` | Explicit override for the STT endpoint |
 | `EXPO_PUBLIC_TTS_URL` | Explicit override for the TTS endpoint |
+| `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` | Web key; enable Maps JavaScript API and restrict by HTTP referrer |
+| `EXPO_PUBLIC_GOOGLE_MAPS_MAP_ID` | Optional production Map ID for web Advanced Markers (`DEMO_MAP_ID` by default) |
+| `GOOGLE_MAPS_ANDROID_API_KEY` | Optional native key restricted to Android app/signing certificate |
+| `GOOGLE_MAPS_IOS_API_KEY` | Optional native key restricted to iOS bundle ID |
 
 ---
 

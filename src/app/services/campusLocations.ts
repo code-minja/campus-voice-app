@@ -74,8 +74,19 @@ function candidatePhrases(value: string): string[] {
 
   const toParts = base.split(/\bto\b/i).map((part) => part.trim()).filter(Boolean);
   const afterTo = toParts.length > 1 ? toParts[toParts.length - 1] : "";
+  const words = base.split(" ").filter(Boolean);
+  const embeddedPhrases: string[] = [];
 
-  return Array.from(new Set([base, stripped, afterTo].filter(Boolean)));
+  for (let start = 0; start < words.length; start += 1) {
+    const maxLength = Math.min(8, words.length - start);
+    for (let length = 1; length <= maxLength; length += 1) {
+      embeddedPhrases.push(words.slice(start, start + length).join(" "));
+    }
+  }
+
+  return Array.from(
+    new Set([base, stripped, afterTo, ...embeddedPhrases].filter(Boolean)),
+  );
 }
 
 function scoreMatch(input: string, candidate: string): number {

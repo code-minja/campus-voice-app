@@ -16,7 +16,6 @@ import {
 } from "../services/footstepAudio";
 import {
   rankCampusLocations,
-  resolveCampusLocation,
 } from "../services/campusLocations";
 
 type UseVoiceNavigationArgs = {
@@ -42,14 +41,6 @@ type PendingDestinationChoice = {
 
 function normalizeUtterance(value: string): string {
   return value.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
-}
-
-async function extractDestinationFromText(value: string): Promise<string | null> {
-  const normalized = normalizeUtterance(value);
-  if (!normalized) return null;
-
-  const location = await resolveCampusLocation(normalized);
-  return location?.name ?? null;
 }
 
 function isAffirmativeIntent(value: string): boolean {
@@ -215,17 +206,21 @@ export function useVoiceNavigation({
     }
   }, [recorder, safeIsRecording, schedule, setAssistantFeedback]);
 
-  const requestAnotherDestination = useCallback(async () => {
+  const requestAnotherDestination = useCallback(async (
+    prompt = "Where would you like to go?",
+  ) => {
     voiceStageRef.current = "awaitingDestination";
     pendingChoicesRef.current = [];
     setIsListening(false);
-    setTranscript("Where would you like to go?");
-    await speakToUser("Where would you like to go?");
+    setTranscript(prompt);
+    await speakToUser(prompt);
     // Defer mic restart to the next tick so we don't race with transition locks.
-    setTimeout(() => {
-      void startRecording(true);
+    schedule(() => {
+      if (isMountedRef.current) {
+        void startRecording(true);
+      }
     }, 0);
-  }, [startRecording]);
+  }, [schedule, startRecording]);
 
   const beginVoiceSession = useCallback(async () => {
     clearSpeechQueue();
@@ -240,19 +235,21 @@ export function useVoiceNavigation({
   const handleTranscriptionIntent = useCallback(
     async (text: string) => {
       if (voiceStageRef.current === "awaitingDestination") {
-        const matches = await rankCampusLocations(text, 3);
+        const matches = (await rankCampusLocations(text, 3)).filter(
+          (match) => match.score >= 0.78,
+        );
         if (!matches.length) {
-          await speakToUser(
-            "I couldn't find that location. Please say a destination like Engineering Building or Library.",
-          );
-          await requestAnotherDestination();
+          await requestAnotherDestination("Please repeat your destination.");
           return;
         }
 
         const strongMatch = matches[0];
         const secondMatch = matches[1];
         const isConfident =
-          matches.length === 1 || strongMatch.score >= 0.92 || (secondMatch ? strongMatch.score - secondMatch.score >= 0.12 : true);
+          strongMatch.score >= 0.92 ||
+          (secondMatch
+            ? strongMatch.score - secondMatch.score >= 0.12
+            : true);
 
         if (isConfident) {
           voiceStageRef.current = "confirmingDestination";
@@ -431,29 +428,33 @@ export function useVoiceNavigation({
     async (suggestion: string) => {
       clearPendingTimeouts();
       if (safeIsRecording()) {
+        await safeStopRecording();
         try {
-          await safeStopRecording();
           await setAudioModeAsync({
             allowsRecording: false,
             playsInSilentMode: true,
+            interruptionMode: "doNotMix",
           });
-        } catch {
-          // noop
+        } catch (error) {
+          announceError(
+            error instanceof Error
+              ? error.message
+              : "Unable to stop microphone recording.",
+          );
+          return;
         }
       }
-
-      const message = `Take me to the ${suggestion}`;
-      setTranscript(message);
-      void speakToUser(message);
-      setIsListening(true);
-
-      schedule(() => {
-        setIsListening(false);
-        setTranscript("");
-        onStartVoiceNavigation(suggestion);
-      }, 1700);
+      setIsListening(false);
+      setTranscript(`Going to ${suggestion}.`);
+      clearSpeechQueue();
+      onStartVoiceNavigation(suggestion);
     },
-    [clearPendingTimeouts, onStartVoiceNavigation, safeIsRecording, safeStopRecording, schedule],
+    [
+      clearPendingTimeouts,
+      onStartVoiceNavigation,
+      safeIsRecording,
+      safeStopRecording,
+    ],
   );
 
   return {

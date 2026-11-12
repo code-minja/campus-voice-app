@@ -8,12 +8,9 @@ import {
   X,
   Play,
   Pause,
-  RotateCcw,
   ChevronDown,
   ChevronUp,
   ArrowUp,
-  ArrowLeft,
-  ArrowRight,
   ArrowUpLeft,
   ArrowUpRight,
   MapPin,
@@ -31,11 +28,18 @@ import { getDirectionIcon, cleanAccessibilityInstruction } from "./RoutePreviewS
 import { useNavigation } from "@react-navigation/native";
 import { type NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { type RootStackParamList } from "../types";
+import {
+  estimateRemainingDurationSeconds,
+  measureRouteProgress,
+  NAVIGATION_TRACKING_CONFIG,
+} from "../services/routeTracking";
+import { useVoiceNavigation } from "../hooks/useVoiceNavigation";
 
 type ActiveNavigationScreenProps = {
   destination: string;
   currentLocation: string;
   currentCoordinate?: GeoCoordinates;
+  locationAccuracyMeters?: number;
   onEndNavigation: () => void;
   onSwitchToVoiceOnly: () => void;
 };
@@ -53,13 +57,29 @@ function formatFootstepsAndMeters(meters: number): string {
   return `${footsteps} footsteps (${safeMeters}m)`;
 }
 
-function formatDuration(seconds?: number): string {
-  if (!seconds || seconds <= 0) {
+function formatArrivalTime(
+  routeDurationSeconds: number | undefined,
+  remainingMeters: number,
+  routeDistanceMeters: number | undefined,
+  now: Date,
+): string {
+  if (
+    !routeDurationSeconds ||
+    routeDurationSeconds <= 0 ||
+    !routeDistanceMeters ||
+    routeDistanceMeters <= 0
+  ) {
     return "--";
   }
 
-  const roundedMinutes = Math.max(1, Math.round(seconds / 60));
-  return `${roundedMinutes} min`;
+  const remainingDuration = Math.ceil(
+    routeDurationSeconds *
+      Math.min(1, Math.max(0, remainingMeters / routeDistanceMeters)),
+  );
+  return new Date(now.getTime() + remainingDuration * 1000).toLocaleTimeString(
+    undefined,
+    { hour: "numeric", minute: "2-digit" },
+  );
 }
 
 function toMeters(a: GeoCoordinates, b: { latitude: number; longitude: number }): number {
@@ -75,53 +95,48 @@ function toMeters(a: GeoCoordinates, b: { latitude: number; longitude: number })
   return R * c;
 }
 
-function snapToRoute(coordinate: GeoCoordinates, polyline: { latitude: number; longitude: number }[]): GeoCoordinates {
-  if (!polyline || polyline.length === 0) return coordinate;
-
-  let nearestPoint = polyline[0];
-  let minDistance = Number.POSITIVE_INFINITY;
-
-  polyline.forEach((point) => {
-    const d = toMeters(coordinate, point);
-    if (d < minDistance) {
-      minDistance = d;
-      nearestPoint = point;
-    }
-  });
-
-  if (minDistance < 25) {
-    return {
-      latitude: nearestPoint.latitude,
-      longitude: nearestPoint.longitude,
-    };
-  }
-
-  return coordinate;
-}
-
 export function ActiveNavigationScreen({
   destination,
   currentLocation,
   currentCoordinate,
+  locationAccuracyMeters,
   onEndNavigation,
   onSwitchToVoiceOnly,
 }: ActiveNavigationScreenProps) {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const [isListening, setIsListening] = useState(false);
-  const [isUpdatingLocation, setIsUpdatingLocation] = useState(false);
+  const { isListening, handleVoicePress } = useVoiceNavigation({
+    onStartVoiceNavigation: (nextDestination) => {
+      navigation.navigate("RoutePreview", { destination: nextDestination });
+    },
+  });
   const [routePayload, setRoutePayload] = useState<RoutePayload | null>(null);
   const [routeLoadError, setRouteLoadError] = useState("");
-  const timeoutHandles = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const [routeRetryCount, setRouteRetryCount] = useState(0);
+  const [currentTime, setCurrentTime] = useState(() => new Date());
+  const routeRequestRef = useRef({ destination: "", started: false });
+  const isMountedRef = useRef(true);
+  const offRouteReadingsRef = useRef(0);
+  const lastRerouteAtRef = useRef(0);
+  const lastAnnouncedRemainingRef = useRef<number | undefined>(undefined);
+  const hasAnnouncedArrivalRef = useRef(false);
 
-  // Simulation states
-  const [isSimulating, setIsSimulating] = useState(false);
-  const [simulationProgress, setSimulationProgress] = useState(0);
-  const [simulationSpeedMultiplier, setSimulationSpeedMultiplier] = useState(2);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const [showStepsList, setShowStepsList] = useState(false);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
 
   const lastSpokenStepIndex = useRef<number>(-1);
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   const destinationCoordinateOverride = useMemo<LatLng | undefined>(() => {
     const coordinate = routePayload?.destination?.coordinate;
@@ -152,64 +167,29 @@ export function ActiveNavigationScreen({
     return segmentDistances[segmentDistances.length - 1];
   }, [segmentDistances]);
 
-  const getCoordinateAtDistance = (distance: number): GeoCoordinates => {
-    const points = routePayload?.route_preview;
-    if (!points || points.length === 0) return currentCoordinate ?? { latitude: 7.481843099892803, longitude: 5.741945337431659 };
-    if (points.length === 1) return points[0];
-    if (distance <= 0) return points[0];
-    const total = totalDistance;
-    if (distance >= total) return points[points.length - 1];
-
-    let i = 0;
-    while (i < segmentDistances.length - 1 && segmentDistances[i + 1] < distance) {
-      i++;
-    }
-
-    const startPoint = points[i];
-    const endPoint = points[i + 1];
-    const dStart = segmentDistances[i];
-    const dEnd = segmentDistances[i + 1];
-    const segmentLen = dEnd - dStart;
-    if (segmentLen <= 0) return startPoint;
-
-    const fraction = (distance - dStart) / segmentLen;
-    return {
-      latitude: startPoint.latitude + (endPoint.latitude - startPoint.latitude) * fraction,
-      longitude: startPoint.longitude + (endPoint.longitude - startPoint.longitude) * fraction,
-    };
-  };
-
-  const simulatedCoordinate = useMemo(() => {
-    return getCoordinateAtDistance(simulationProgress);
-  }, [simulationProgress, segmentDistances, routePayload]);
-
   const activeCoordinate = useMemo(() => {
-    if (isSimulating && routePayload?.steps?.length) {
-      if (currentStepIndex <= 0) {
-        return routePayload.origin;
-      }
-      if (currentStepIndex >= routePayload.steps.length) {
-        return routePayload.steps[routePayload.steps.length - 1].waypoint;
-      }
-      return routePayload.steps[currentStepIndex - 1].waypoint;
-    }
+    return currentCoordinate ?? routePayload?.origin;
+  }, [currentCoordinate, routePayload?.origin]);
 
-    const rawCoord = currentCoordinate ?? routePayload?.origin;
-    if (rawCoord && routePayload?.route_preview?.length) {
-      return snapToRoute(rawCoord, routePayload.route_preview);
+  const measuredRouteProgress = useMemo(() => {
+    if (!activeCoordinate || !routePayload?.route_preview?.length) {
+      return undefined;
     }
-    return rawCoord;
-  }, [isSimulating, currentStepIndex, currentCoordinate, routePayload]);
+    return measureRouteProgress(activeCoordinate, routePayload.route_preview);
+  }, [activeCoordinate, routePayload?.route_preview]);
 
-  // Update currentStepIndex in real-life navigation based on snapped GPS location
+  // Update the current instruction based on the live GPS location.
   useEffect(() => {
-    if (isSimulating || !routePayload?.steps?.length || !activeCoordinate) {
+    if (!routePayload?.steps?.length || !activeCoordinate) {
       return;
     }
 
-    let nearestIdx = 0;
+    let nearestIdx = currentStepIndex;
     let nearestDist = Number.POSITIVE_INFINITY;
     routePayload.steps.forEach((step, idx) => {
+      if (idx < currentStepIndex) {
+        return;
+      }
       const d = toMeters(activeCoordinate, step.waypoint);
       if (d < nearestDist) {
         nearestDist = d;
@@ -217,10 +197,16 @@ export function ActiveNavigationScreen({
       }
     });
 
-    if (nearestIdx !== currentStepIndex) {
+    if (
+      nearestIdx > currentStepIndex &&
+      toMeters(
+        activeCoordinate,
+        routePayload.steps[currentStepIndex].waypoint,
+      ) < NAVIGATION_TRACKING_CONFIG.stepAnnouncementDistanceMeters
+    ) {
       setCurrentStepIndex(nearestIdx);
     }
-  }, [activeCoordinate, isSimulating, routePayload, currentStepIndex]);
+  }, [activeCoordinate, routePayload, currentStepIndex]);
 
   // Voice steps guidance
   useEffect(() => {
@@ -233,170 +219,142 @@ export function ActiveNavigationScreen({
       void speakToUser(cleanInstruction);
       lastSpokenStepIndex.current = currentStepIndex;
 
-      // Prefetch next step audio
-      const nextStep = routePayload.steps[currentStepIndex + 1];
-      if (nextStep) {
-        const nextCleanInstruction = cleanAccessibilityInstruction(nextStep.instruction);
-        void prefetchAudio(nextCleanInstruction);
-      }
+      routePayload.steps
+        .slice(currentStepIndex + 1, currentStepIndex + 3)
+        .forEach((nextStep) =>
+          void prefetchAudio(
+            cleanAccessibilityInstruction(nextStep.instruction),
+          ),
+        );
     }
   }, [currentStepIndex, routePayload]);
 
-  const handleNextStep = () => {
-    if (!routePayload?.steps?.length) return;
-
-    // Calculate cumulative distances
-    const stepDistances: number[] = [0];
-    let total = 0;
-    routePayload.steps.forEach((step) => {
-      total += step.distance_meters;
-      stepDistances.push(total);
-    });
-
-    let nextIdx = currentStepIndex + 1;
-    if (nextIdx > routePayload.steps.length) {
+  useEffect(() => {
+    if (!routePayload || !measuredRouteProgress || routePayload.simulated) {
+      lastAnnouncedRemainingRef.current = undefined;
       return;
     }
 
-    setIsSimulating(true);
-    setCurrentStepIndex(nextIdx);
-    const nextProgress = stepDistances[nextIdx];
-    setSimulationProgress(nextProgress);
-
-    if (nextIdx === routePayload.steps.length) {
-      void speakToUser("You have arrived at your destination, " + destination);
-      navigation.navigate("Arrival", {
-        destination,
-        durationSeconds: routePayload.estimated_duration_seconds,
-        distanceMeters: totalDistance,
-      });
+    const remaining = measuredRouteProgress.remainingMeters;
+    const previous = lastAnnouncedRemainingRef.current;
+    if (previous === undefined) {
+      lastAnnouncedRemainingRef.current = remaining;
+    } else if (
+      previous - remaining >=
+      NAVIGATION_TRACKING_CONFIG.announcementIntervalMeters
+    ) {
+      lastAnnouncedRemainingRef.current = remaining;
+      void speakToUser(
+        `About ${Math.max(0, Math.round(remaining))} meters remain to ${destination}.`,
+      );
     }
-  };
+  }, [destination, measuredRouteProgress, routePayload]);
 
-  const handlePrevStep = () => {
-    if (!routePayload?.steps?.length) return;
-
-    // Calculate cumulative distances
-    const stepDistances: number[] = [0];
-    let total = 0;
-    routePayload.steps.forEach((step) => {
-      total += step.distance_meters;
-      stepDistances.push(total);
-    });
-
-    let prevIdx = currentStepIndex - 1;
-    if (prevIdx < 0) {
-      prevIdx = 0;
-    }
-
-    setIsSimulating(prevIdx > 0);
-    setCurrentStepIndex(prevIdx);
-    const prevProgress = stepDistances[prevIdx];
-    setSimulationProgress(prevProgress);
-  };
-
-  // Periodic check-in every 2 minutes (120 seconds) to reassure the user
+  // Arrival detection uses the live GPS location.
   useEffect(() => {
-    if (!routePayload || !activeCoordinate) return;
-
-    const interval = setInterval(() => {
-      const nextStepIndex = currentStepIndex + 1;
-      if (nextStepIndex < routePayload.steps.length) {
-        const nextStep = routePayload.steps[nextStepIndex];
-        const dist = toMeters(activeCoordinate, nextStep.waypoint);
-        const stepsCount = Math.max(1, Math.round(dist / 0.75));
-
-        if (dist < 15) {
-          const cleanInst = cleanAccessibilityInstruction(nextStep.instruction);
-          void speakToUser(`Turn alert: ${cleanInst}`);
-        } else {
-          const feetText = `${Math.round(dist * 3.28)} feet`;
-          void speakToUser(`Keep going straight for another ${feetText} or about ${stepsCount} footsteps.`);
-        }
-      }
-    }, 120000);
-
-    return () => clearInterval(interval);
-  }, [routePayload, activeCoordinate, currentStepIndex, destination]);
-
-  // Real-life arrival detection (when not simulating)
-  useEffect(() => {
-    if (isSimulating || !routePayload || !activeCoordinate || !destinationCoordinateOverride || routePayload.simulated) {
+    if (
+      !routePayload ||
+      !activeCoordinate ||
+      !destinationCoordinateOverride ||
+      routePayload.simulated ||
+      locationAccuracyMeters === undefined ||
+      locationAccuracyMeters > NAVIGATION_TRACKING_CONFIG.maxGpsAccuracyMeters ||
+      hasAnnouncedArrivalRef.current
+    ) {
       return;
     }
     const dist = toMeters(activeCoordinate, destinationCoordinateOverride);
-    if (dist < 15) {
-      void speakToUser("You have arrived at your destination, " + destination);
-      navigation.navigate("Arrival", {
+    if (dist < NAVIGATION_TRACKING_CONFIG.arrivalRadiusMeters) {
+      hasAnnouncedArrivalRef.current = true;
+      void speakToUser(`You have arrived at your destination, ${destination}.`);
+      navigation.replace("Arrival", {
         destination,
         durationSeconds: routePayload.estimated_duration_seconds,
         distanceMeters: totalDistance,
       });
     }
-  }, [activeCoordinate, isSimulating, routePayload, destinationCoordinateOverride, destination, totalDistance, navigation]);
+  }, [activeCoordinate, routePayload, destinationCoordinateOverride, destination, totalDistance, navigation, locationAccuracyMeters]);
 
   // Find the minimum distance to any point on the route polyline
   const distanceToRoute = useMemo(() => {
-    if (!routePayload?.route_preview?.length || !activeCoordinate) return 0;
-    let minD = Number.POSITIVE_INFINITY;
-    routePayload.route_preview.forEach((point) => {
-      const d = toMeters(activeCoordinate, point);
-      if (d < minD) {
-        minD = d;
-      }
-    });
-    return minD;
-  }, [routePayload, activeCoordinate]);
+    return measuredRouteProgress?.distanceToRouteMeters ?? 0;
+  }, [measuredRouteProgress]);
 
   // Handle route deviation recalculation
   const isRecalculatingRef = useRef(false);
   useEffect(() => {
-    // Only detect route deviations for real campus navigation walks (disable during simulation and mock routes)
-    if (isSimulating || routePayload?.simulated || !activeCoordinate || !routePayload) {
+    if (
+      routePayload?.simulated ||
+      !activeCoordinate ||
+      !routePayload ||
+      locationAccuracyMeters === undefined ||
+      locationAccuracyMeters > NAVIGATION_TRACKING_CONFIG.maxGpsAccuracyMeters
+    ) {
+      offRouteReadingsRef.current = 0;
       return;
     }
 
-    if (distanceToRoute > 20 && !isRecalculatingRef.current) {
+    if (distanceToRoute <= NAVIGATION_TRACKING_CONFIG.offRouteThresholdMeters) {
+      offRouteReadingsRef.current = 0;
+      return;
+    }
+
+    offRouteReadingsRef.current += 1;
+    const now = Date.now();
+    if (
+      offRouteReadingsRef.current >=
+        NAVIGATION_TRACKING_CONFIG.offRouteConfirmations &&
+      !isRecalculatingRef.current &&
+      now - lastRerouteAtRef.current >= 5000
+    ) {
+      offRouteReadingsRef.current = 0;
       isRecalculatingRef.current = true;
+      lastRerouteAtRef.current = now;
       void (async () => {
+        const requestStartedAt = Date.now();
         try {
-          await speakToUser("Rerouting... Recalculating path to " + destination);
+          void speakToUser(`You are off route. Recalculating a path to ${destination}.`);
           const newPayload = await fetchRouteFromBackend(activeCoordinate, destination);
-          setRoutePayload(newPayload);
+          if (
+            isMountedRef.current &&
+            routeRequestRef.current.destination === destination
+          ) {
+            setRoutePayload(newPayload);
+            setCurrentStepIndex(0);
+            lastSpokenStepIndex.current = -1;
+            lastAnnouncedRemainingRef.current = undefined;
+          }
+          const elapsedMilliseconds = Date.now() - requestStartedAt;
+          console.info("[navigation] reroute completed", {
+            duration_ms: elapsedMilliseconds,
+            target_ms: NAVIGATION_TRACKING_CONFIG.rerouteTargetMilliseconds,
+            within_target:
+              elapsedMilliseconds <=
+              NAVIGATION_TRACKING_CONFIG.rerouteTargetMilliseconds,
+          });
         } catch (err) {
-          console.warn("Recalculation failed:", err);
+          console.warn("[navigation] reroute failed", {
+            duration_ms: Date.now() - requestStartedAt,
+            error: err instanceof Error ? err.message : "Unknown reroute error",
+          });
+          if (
+            isMountedRef.current &&
+            routeRequestRef.current.destination === destination
+          ) {
+            void speakToUser(
+              "I couldn't recalculate the route. I will try again when your location updates.",
+            );
+          }
         } finally {
           isRecalculatingRef.current = false;
         }
       })();
     }
-  }, [distanceToRoute, activeCoordinate, destination, isSimulating, routePayload]);
+  }, [distanceToRoute, activeCoordinate, destination, routePayload, locationAccuracyMeters]);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      setIsUpdatingLocation(true);
-      const handle = setTimeout(() => setIsUpdatingLocation(false), 1200);
-      timeoutHandles.current.push(handle);
-    }, 6500);
-
-    return () => {
-      clearInterval(interval);
-      timeoutHandles.current.forEach((h) => clearTimeout(h));
-      timeoutHandles.current = [];
-      clearSpeechQueue();
-    };
+    return () => clearSpeechQueue();
   }, []);
-
-  const handleMicTap = () => {
-    if (isListening) {
-      setIsListening(false);
-      return;
-    }
-
-    setIsListening(true);
-    const handle = setTimeout(() => setIsListening(false), 2800);
-    timeoutHandles.current.push(handle);
-  };
 
   const mapRouteWaypoints = useMemo<LatLng[] | undefined>(() => {
     if (!routePayload?.route_preview?.length || !activeCoordinate) {
@@ -427,9 +385,7 @@ export function ActiveNavigationScreen({
   }, [routePayload, activeCoordinate]);
 
   const mapOriginCoordinate = activeCoordinate;
-  const mapCurrentLocation = routePayload?.simulated || isSimulating
-    ? "Simulated location"
-    : currentLocation;
+  const mapCurrentLocation = currentLocation;
 
 
 
@@ -444,12 +400,13 @@ export function ActiveNavigationScreen({
       };
     }
 
-    const remainingMeters = routePayload.steps
-      .slice(currentStepIndex)
-      .reduce((sum, step) => sum + step.distance_meters, 0);
-
     const nextStep = routePayload.steps[currentStepIndex];
     const distanceToNextMeters = nextStep ? toMeters(activeCoordinate, nextStep.waypoint) : 0;
+    const remainingMeters =
+      distanceToNextMeters +
+      routePayload.steps
+        .slice(currentStepIndex + 1)
+        .reduce((sum, step) => sum + step.distance_meters, 0);
     const cleanInstruction = nextStep ? cleanAccessibilityInstruction(nextStep.instruction) : "Arriving...";
 
     return {
@@ -460,29 +417,55 @@ export function ActiveNavigationScreen({
   }, [activeCoordinate, currentStepIndex, routeLoadError, routePayload]);
 
   useEffect(() => {
-    let cancelled = false;
+    if (routeRequestRef.current.destination !== destination) {
+      routeRequestRef.current = { destination, started: false };
+      setRoutePayload(null);
+      setRouteLoadError("");
+      setCurrentStepIndex(0);
+      lastSpokenStepIndex.current = -1;
+      offRouteReadingsRef.current = 0;
+      lastRerouteAtRef.current = 0;
+      lastAnnouncedRemainingRef.current = undefined;
+      hasAnnouncedArrivalRef.current = false;
+    }
+
     if (!destination.trim()) {
       return;
     }
+    if (!currentCoordinate || routeRequestRef.current.started) {
+      return;
+    }
+    routeRequestRef.current.started = true;
 
     void (async () => {
       try {
         setRouteLoadError("");
         const payload = await fetchRouteFromBackend(currentCoordinate, destination);
-        if (!cancelled) {
+        if (
+          isMountedRef.current &&
+          routeRequestRef.current.destination === destination
+        ) {
           setRoutePayload(payload);
         }
       } catch (error) {
-        if (!cancelled) {
-          setRouteLoadError(error instanceof Error ? error.message : "Unable to load route");
+        if (
+          isMountedRef.current &&
+          routeRequestRef.current.destination === destination
+        ) {
+          routeRequestRef.current.started = false;
+          const message =
+            error instanceof Error ? error.message : "Unable to load route";
+          setRouteLoadError(message);
+          void speakToUser(message);
         }
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [currentCoordinate, destination]);
+  }, [
+    currentCoordinate?.latitude,
+    currentCoordinate?.longitude,
+    destination,
+    routeRetryCount,
+  ]);
 
   return (
     <View style={styles.root}>
@@ -491,7 +474,6 @@ export function ActiveNavigationScreen({
         currentLocation={mapCurrentLocation}
         currentCoordinate={mapOriginCoordinate}
         routeWaypoints={mapRouteWaypoints}
-        destinationCoordinateOverride={destinationCoordinateOverride}
         mode="active"
         showBadge={false}
       />
@@ -503,15 +485,8 @@ export function ActiveNavigationScreen({
       >
         <View style={[styles.topWrap, { paddingTop: Math.max(insets.top, 8) }]}>
           <View style={styles.locationHintWrap}>
-            <View
-              style={[
-                styles.locationDot,
-                isUpdatingLocation && styles.locationDotUpdating,
-              ]}
-            />
-            <Text style={styles.locationHintText}>
-              {isUpdatingLocation ? "Updating location..." : mapCurrentLocation}
-            </Text>
+            <View style={styles.locationDot} />
+            <Text style={styles.locationHintText}>{mapCurrentLocation}</Text>
           </View>
 
           <View style={styles.destinationBar}>
@@ -522,7 +497,12 @@ export function ActiveNavigationScreen({
             <View>
               <Text style={styles.destinationLabel}>ETA</Text>
               <Text style={styles.etaValue}>
-                {routePayload ? formatDuration(routePayload.estimated_duration_seconds) : "--"}
+                {formatArrivalTime(
+                  routePayload?.estimated_duration_seconds,
+                  routeProgress.remainingMeters,
+                  routePayload?.total_distance_meters,
+                  currentTime,
+                )}
               </Text>
             </View>
           </View>
@@ -555,7 +535,15 @@ export function ActiveNavigationScreen({
             </View>
             <Text style={styles.instructionText}>{routeProgress.currentStepInstruction}</Text>
             {!!routeLoadError && (
-              <Text style={styles.routeErrorText}>{routeLoadError}</Text>
+              <Pressable
+                onPress={() => setRouteRetryCount((count) => count + 1)}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading route"
+              >
+                <Text style={styles.routeErrorText}>
+                  {routeLoadError} Tap to retry.
+                </Text>
+              </Pressable>
             )}
 
             {showStepsList && routePayload?.steps && (
@@ -593,51 +581,6 @@ export function ActiveNavigationScreen({
             )}
           </View>
 
-          {!!routePayload && (
-            <View style={styles.simulationCard}>
-              <View style={styles.simulationHeader}>
-                <View style={styles.simulationStatusRow}>
-                  <View style={[styles.simulationIndicatorDot, isSimulating && styles.simulationIndicatorDotActive]} />
-                  <Text style={styles.simulationTitle}>Step Simulator</Text>
-                </View>
-                <Text style={styles.simulationProgressText}>
-                  Step {currentStepIndex + 1} of {routePayload.steps.length}
-                </Text>
-              </View>
-
-              <View style={styles.simulationControlsRow}>
-                <Pressable
-                  onPress={handlePrevStep}
-                  style={[styles.simulationButton, currentStepIndex <= 0 && styles.simulationButtonDisabled]}
-                  disabled={currentStepIndex <= 0}
-                >
-                  <ArrowLeft size={14} color="#ffffff" />
-                  <Text style={styles.simulationButtonText}>Prev Step</Text>
-                </Pressable>
-
-                <Pressable
-                  onPress={handleNextStep}
-                  style={styles.simulationButton}
-                >
-                  <Text style={styles.simulationButtonText}>Next Step</Text>
-                  <ArrowRight size={14} color="#ffffff" />
-                </Pressable>
-
-                <Pressable
-                  onPress={() => {
-                    setIsSimulating(false);
-                    setSimulationProgress(0);
-                    setCurrentStepIndex(0);
-                    lastSpokenStepIndex.current = -1;
-                    clearSpeechQueue();
-                  }}
-                  style={styles.resetButton}
-                >
-                  <RotateCcw size={14} color="#cbd5e1" />
-                </Pressable>
-              </View>
-            </View>
-          )}
         </View>
 
         <View style={styles.voiceActiveBadge}>
@@ -659,8 +602,8 @@ export function ActiveNavigationScreen({
 
           <VoiceButton
             isListening={isListening}
-            onPress={handleMicTap}
-            accessibilityLabel={isListening ? "Listening, tap to stop" : "Tap to speak"}
+            onPress={handleVoicePress}
+            accessibilityLabel={isListening ? "Listening, tap to stop" : "Speak a new destination"}
             size={72}
             iconSize={28}
           />
@@ -702,9 +645,6 @@ const styles = StyleSheet.create({
     height: 7,
     borderRadius: 999,
     backgroundColor: "#60a5fa",
-  },
-  locationDotUpdating: {
-    backgroundColor: "#22d3ee",
   },
   locationHintText: {
     fontSize: 12,
@@ -809,103 +749,6 @@ const styles = StyleSheet.create({
     marginTop: 2,
     color: "#64748b",
     fontSize: 11,
-  },
-  simulationCard: {
-    marginTop: 10,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "rgba(51, 65, 85, 0.65)",
-    backgroundColor: "rgba(15, 23, 42, 0.88)",
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  simulationHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 8,
-  },
-  simulationStatusRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  simulationIndicatorDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 999,
-    backgroundColor: "#64748b",
-  },
-  simulationIndicatorDotActive: {
-    backgroundColor: "#22c55e",
-  },
-  simulationTitle: {
-    color: "#e2e8f0",
-    fontSize: 11,
-    fontWeight: "600",
-    letterSpacing: 0.5,
-    textTransform: "uppercase",
-  },
-  simulationProgressText: {
-    color: "#94a3b8",
-    fontSize: 11,
-  },
-  simulationControlsRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-  },
-  simulationButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "#0ea5e9",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    minWidth: 80,
-    justifyContent: "center",
-  },
-  simulationButtonDisabled: {
-    opacity: 0.4,
-  },
-  simulationButtonText: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  speedSelector: {
-    flexDirection: "row",
-    backgroundColor: "rgba(30, 41, 59, 0.6)",
-    borderRadius: 10,
-    padding: 3,
-  },
-  speedOption: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 8,
-  },
-  speedOptionActive: {
-    backgroundColor: "#1e293b",
-    borderWidth: 1,
-    borderColor: "rgba(51, 65, 85, 0.5)",
-  },
-  speedOptionText: {
-    color: "#64748b",
-    fontSize: 11,
-    fontWeight: "500",
-  },
-  speedOptionTextActive: {
-    color: "#22d3ee",
-  },
-  resetButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(30, 41, 59, 0.6)",
   },
   distanceBadge: {
     alignSelf: "flex-start",

@@ -1,19 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import MapView, { LatLng, Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
+import MapView, { LatLng, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import { Navigation } from "lucide-react-native";
 import type { GeoCoordinates } from "../types";
-import {
-  getCampusLocations,
-  type CampusLocation,
-} from "../services/campusLocations";
+import { AAUA_CAMPUS_BOUNDS } from "./campusMapBounds";
 
 type GoogleRouteMapProps = {
   destination: string;
   currentLocation: string;
   currentCoordinate?: GeoCoordinates;
   routeWaypoints?: LatLng[];
-  destinationCoordinateOverride?: LatLng;
   mode?: "preview" | "active";
   showBadge?: boolean;
 };
@@ -22,13 +18,6 @@ const fallbackStartCoordinate: LatLng = {
   latitude: 7.481843099892803,
   longitude: 5.741945337431659,
 };
-
-function coordinatesMatch(left: LatLng, right: LatLng) {
-  return (
-    Math.abs(left.latitude - right.latitude) < 0.00001 &&
-    Math.abs(left.longitude - right.longitude) < 0.00001
-  );
-}
 
 function getBearing(from: LatLng, to: LatLng): number {
   const lat1 = (from.latitude * Math.PI) / 180;
@@ -42,40 +31,6 @@ function getBearing(from: LatLng, to: LatLng): number {
     Math.sin(lat1) * Math.cos(lat2) * Math.cos(lon2 - lon1);
   const bearing = (Math.atan2(y, x) * 180) / Math.PI;
   return (bearing + 360) % 360;
-}
-
-function hashString(value: string) {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash << 5) - hash + value.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
-function getDestinationCoordinate(destination: string, start: LatLng): LatLng {
-  const hash = hashString(destination);
-  const latOffset = ((hash % 25) - 12) * 0.0007;
-  const lngOffset = (((hash >> 3) % 25) - 12) * 0.0007;
-
-  return {
-    latitude: start.latitude + latOffset,
-    longitude: start.longitude + lngOffset,
-  };
-}
-
-function buildRouteCoordinates(start: LatLng, end: LatLng): LatLng[] {
-  const midA: LatLng = {
-    latitude: start.latitude + (end.latitude - start.latitude) * 0.35 + 0.0004,
-    longitude: start.longitude + (end.longitude - start.longitude) * 0.3,
-  };
-
-  const midB: LatLng = {
-    latitude: start.latitude + (end.latitude - start.latitude) * 0.68,
-    longitude: start.longitude + (end.longitude - start.longitude) * 0.72 - 0.00025,
-  };
-
-  return [start, midA, midB, end];
 }
 
 function getRegionFromRoute(points: LatLng[]) {
@@ -96,40 +51,25 @@ function getRegionFromRoute(points: LatLng[]) {
 }
 
 export function GoogleRouteMap({
-  destination,
-  currentLocation,
   currentCoordinate,
   routeWaypoints,
-  destinationCoordinateOverride,
   mode = "preview",
   showBadge = true,
 }: GoogleRouteMapProps) {
   const mapRef = useRef<MapView | null>(null);
-  const [campusLocations, setCampusLocations] = useState<CampusLocation[]>([]);
 
-  const startCoordinate = useMemo<LatLng>(
+  const routeOrigin = useMemo<LatLng | undefined>(
     () =>
-      currentCoordinate
-        ? {
-            latitude: currentCoordinate.latitude,
-            longitude: currentCoordinate.longitude,
-          }
-        : fallbackStartCoordinate,
-    [currentCoordinate],
+      currentCoordinate ?? routeWaypoints?.[0],
+    [currentCoordinate, routeWaypoints],
   );
 
-  const destinationCoordinate = useMemo(() => {
-    if (destinationCoordinateOverride) {
-      return destinationCoordinateOverride;
-    }
-    return getDestinationCoordinate(destination, startCoordinate);
-  }, [destinationCoordinateOverride, destination, startCoordinate]);
+  const startCoordinate = routeOrigin ?? fallbackStartCoordinate;
   const routeCoordinates = useMemo(
-    () =>
-      routeWaypoints && routeWaypoints.length >= 2
-        ? routeWaypoints
-        : buildRouteCoordinates(startCoordinate, destinationCoordinate),
-    [destinationCoordinate, routeWaypoints, startCoordinate],
+    () => routeWaypoints && routeWaypoints.length >= 2
+      ? routeWaypoints
+      : [startCoordinate],
+    [routeWaypoints, startCoordinate],
   );
 
   const region = useMemo(() => getRegionFromRoute(routeCoordinates), [routeCoordinates]);
@@ -158,24 +98,21 @@ export function GoogleRouteMap({
   }, [currentCoordinate]);
 
   useEffect(() => {
-    let cancelled = false;
+    if (!mapRef.current || !isMapReady) {
+      return;
+    }
 
-    void getCampusLocations()
-      .then((locations) => {
-        if (!cancelled) {
-          setCampusLocations(locations);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCampusLocations([]);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    mapRef.current.setMapBoundaries(
+      {
+        latitude: AAUA_CAMPUS_BOUNDS.north,
+        longitude: AAUA_CAMPUS_BOUNDS.east,
+      },
+      {
+        latitude: AAUA_CAMPUS_BOUNDS.south,
+        longitude: AAUA_CAMPUS_BOUNDS.west,
+      },
+    );
+  }, [isMapReady]);
 
   useEffect(() => {
     if (!mapRef.current || !isMapReady) {
@@ -197,13 +134,13 @@ export function GoogleRouteMap({
       return;
     }
 
-    if (mode === "preview" && routeCoordinates && routeCoordinates.length >= 2) {
+    if (mode === "preview" && routeWaypoints && routeWaypoints.length >= 2) {
       mapRef.current.fitToCoordinates(routeCoordinates, {
         edgePadding: { top: 90, right: 60, bottom: 220, left: 60 },
         animated: true,
       });
     }
-  }, [currentCoordinate, mode, routeCoordinates, currentHeading, isUserTracking, isMapReady]);
+  }, [currentCoordinate, mode, routeCoordinates, routeWaypoints, currentHeading, isUserTracking, isMapReady]);
 
   return (
     <View style={styles.root} pointerEvents="box-none">
@@ -212,15 +149,17 @@ export function GoogleRouteMap({
         style={StyleSheet.absoluteFill}
         provider={Platform.OS === "web" ? undefined : PROVIDER_GOOGLE}
         initialRegion={region}
-        mapType="standard"
+        mapType="satellite"
+        minZoomLevel={14}
+        maxZoomLevel={20}
         scrollEnabled
         zoomEnabled
         rotateEnabled
         pitchEnabled
-        showsUserLocation={!!currentCoordinate}
         showsCompass={false}
         showsScale={false}
         showsTraffic={false}
+        showsUserLocation={false}
         showsBuildings
         showsIndoors
         toolbarEnabled={Platform.OS === "android"}
@@ -231,49 +170,16 @@ export function GoogleRouteMap({
           }
         }}
       >
-        <Polyline
-          coordinates={routeCoordinates}
-          strokeWidth={mode === "active" ? 7 : 6}
-          strokeColor="#22d3ee"
-          lineCap="round"
-          lineJoin="round"
-        />
+        {routeWaypoints && routeWaypoints.length >= 2 && (
+          <Polyline
+            coordinates={routeCoordinates}
+            strokeWidth={mode === "active" ? 7 : 6}
+            strokeColor="#22d3ee"
+            lineCap="round"
+            lineJoin="round"
+          />
+        )}
 
-        <Marker coordinate={startCoordinate} title="Current location" description={currentLocation}>
-          <View style={styles.userMarkerOuter}>
-            <View style={styles.userMarkerInner} />
-          </View>
-        </Marker>
-
-        <Marker
-          coordinate={destinationCoordinate}
-          title={destination}
-          description="Destination"
-          pinColor="#22d3ee"
-        />
-
-        {campusLocations.map((location) => {
-          const markerCoordinate: LatLng = {
-            latitude: location.latitude,
-            longitude: location.longitude,
-          };
-          if (
-            coordinatesMatch(markerCoordinate, startCoordinate) ||
-            coordinatesMatch(markerCoordinate, destinationCoordinate)
-          ) {
-            return null;
-          }
-
-          return (
-            <Marker
-              key={location.id}
-              coordinate={markerCoordinate}
-              title={location.name}
-              description={location.aliases.slice(0, 3).join(", ")}
-              pinColor="#60a5fa"
-            />
-          );
-        })}
       </MapView>
 
       <View pointerEvents="none" style={styles.mapOverlayTop} />
@@ -310,7 +216,7 @@ export function GoogleRouteMap({
 
       {showBadge && (
         <View pointerEvents="none" style={styles.googleBadge}>
-          <Text style={styles.googleBadgeText}>Google-style map</Text>
+          <Text style={styles.googleBadgeText}>Google Maps</Text>
         </View>
       )}
     </View>
@@ -319,26 +225,8 @@ export function GoogleRouteMap({
 
 const styles = StyleSheet.create({
   root: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: "#0f172a",
-  },
-  userMarkerOuter: {
-    width: 24,
-    height: 24,
-    borderRadius: 999,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(34, 211, 238, 0.24)",
-    borderWidth: 1,
-    borderColor: "rgba(34, 211, 238, 0.5)",
-  },
-  userMarkerInner: {
-    width: 11,
-    height: 11,
-    borderRadius: 999,
-    backgroundColor: "#22d3ee",
-    borderWidth: 2,
-    borderColor: "#ecfeff",
   },
   mapOverlayTop: {
     position: "absolute",

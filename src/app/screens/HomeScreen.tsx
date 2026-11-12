@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Animated, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { MapPin, Settings } from "lucide-react-native";
@@ -7,6 +7,7 @@ import { SuggestionChips } from "../components/SuggestionChips";
 import { VoiceButton } from "../components/VoiceButton";
 import { VoiceWaveIndicator } from "../components/VoiceWaveIndicator";
 import { useVoiceNavigation } from "../hooks/useVoiceNavigation";
+import { getCampusLocations, type CampusLocation } from "../services/campusLocations";
 
 type HomeScreenProps = {
   currentLocation: string;
@@ -14,14 +15,14 @@ type HomeScreenProps = {
   onOpenSettings: () => void;
 };
 
-const suggestions = ["Library", "ETF", "Hostel"];
-
 export function HomeScreen({
   currentLocation,
   onStartVoiceNavigation,
   onOpenSettings,
 }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
+  const [campusLocations, setCampusLocations] = useState<CampusLocation[]>([]);
+  const [locationsError, setLocationsError] = useState("");
   const hasPlayedWelcomeRef = useRef(false);
   const { isListening, transcript, beginVoiceSession, handleVoicePress, handleSuggestionPress } =
     useVoiceNavigation({
@@ -29,6 +30,32 @@ export function HomeScreen({
     });
 
   const locationPulse = useRef(new Animated.Value(0)).current;
+  const suggestions = useMemo(
+    () => campusLocations.slice(0, 3).map((location) => location.name),
+    [campusLocations],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCampusLocations()
+      .then((locations) => {
+        if (!cancelled) {
+          setCampusLocations(locations);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLocationsError(
+            error instanceof Error
+              ? error.message
+              : "Unable to load campus destinations.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const loop = Animated.loop(
@@ -128,7 +155,16 @@ export function HomeScreen({
 
         <View style={[styles.bottomSection, { paddingBottom: 20 + Math.max(insets.bottom, 8) }]}>
           <Text style={styles.quickLabel}>Quick locations</Text>
-          <SuggestionChips suggestions={suggestions} onSuggestionPress={handleSuggestionPress} />
+          {suggestions.length ? (
+            <SuggestionChips
+              suggestions={suggestions}
+              onSuggestionPress={handleSuggestionPress}
+            />
+          ) : (
+            <Text style={styles.quickLocationsStatus}>
+              {locationsError || "Loading campus destinations..."}
+            </Text>
+          )}
         </View>
       </SafeAreaView>
     </View>
@@ -244,5 +280,11 @@ const styles = StyleSheet.create({
     textAlign: "center",
     color: "#94a3b8",
     fontSize: 14,
+  },
+  quickLocationsStatus: {
+    color: "#94a3b8",
+    fontSize: 13,
+    textAlign: "center",
+    paddingVertical: 12,
   },
 });

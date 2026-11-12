@@ -1,85 +1,79 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { MapPin } from "lucide-react-native";
 import { MapBackground } from "../components/MapBackground";
 import { StackHeader } from "../components/StackHeader";
 import { VoiceButton } from "../components/VoiceButton";
-
-type LocationResult = {
-  id: string;
-  name: string;
-  descriptor: string;
-  distance?: string;
-};
+import { useVoiceNavigation } from "../hooks/useVoiceNavigation";
+import type { GeoCoordinates } from "../types";
+import {
+  getCampusLocations,
+  rankCampusLocations,
+  type CampusLocation,
+} from "../services/campusLocations";
+import { distanceBetweenCoordinates } from "../services/routeTracking";
 
 type SearchResultsScreenProps = {
   query?: string;
+  currentCoordinate?: GeoCoordinates;
   onBack: () => void;
   onSelectLocation: (name: string) => void;
 };
 
-const defaultResults: LocationResult[] = [
-  {
-    id: "1",
-    name: "Main Library",
-    descriptor: "Near ETF Building",
-    distance: "300m away",
-  },
-  {
-    id: "2",
-    name: "Medical Library",
-    descriptor: "Opposite Admin Block",
-    distance: "450m away",
-  },
-  {
-    id: "3",
-    name: "Law Library",
-    descriptor: "Inside Law Faculty",
-    distance: "800m away",
-  },
-];
-
-export function SearchResultsScreen({ query, onBack, onSelectLocation }: SearchResultsScreenProps) {
+export function SearchResultsScreen({
+  query,
+  currentCoordinate,
+  onBack,
+  onSelectLocation,
+}: SearchResultsScreenProps) {
   const insets = useSafeAreaInsets();
-  const [isListening, setIsListening] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const timeoutHandles = useRef<ReturnType<typeof setTimeout>[]>([]);
-
-  const clearTimeouts = () => {
-    timeoutHandles.current.forEach((handle) => clearTimeout(handle));
-    timeoutHandles.current = [];
-  };
+  const [isLoading, setIsLoading] = useState(true);
+  const [locations, setLocations] = useState<CampusLocation[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [selectedId, setSelectedId] = useState<number>();
+  const { isListening, transcript, handleVoicePress } = useVoiceNavigation({
+    onStartVoiceNavigation: onSelectLocation,
+  });
 
   useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    setLoadError("");
+
+    const loadLocations = query?.trim()
+      ? rankCampusLocations(query, 5).then((matches) =>
+          matches
+            .filter((match) => match.score >= 0.5)
+            .map((match) => match.location),
+        )
+      : getCampusLocations();
+
+    void loadLocations
+      .then((result) => {
+        if (!cancelled) {
+          setLocations(result);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLoadError(
+            error instanceof Error
+              ? error.message
+              : "Unable to load campus destinations.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      });
+
     return () => {
-      clearTimeouts();
+      cancelled = true;
     };
-  }, []);
-
-  const handleVoice = () => {
-    clearTimeouts();
-    if (isListening) {
-      setIsListening(false);
-      return;
-    }
-
-    setIsListening(true);
-    const handle = setTimeout(() => {
-      const picked = defaultResults[0];
-      setSelectedId(picked.id);
-      setIsListening(false);
-      const selectHandle = setTimeout(() => onSelectLocation(picked.name), 250);
-      timeoutHandles.current.push(selectHandle);
-    }, 2000);
-    timeoutHandles.current.push(handle);
-  };
-
-  const handleLocationTap = (result: LocationResult) => {
-    setSelectedId(result.id);
-    const handle = setTimeout(() => onSelectLocation(result.name), 250);
-    timeoutHandles.current.push(handle);
-  };
+  }, [query]);
 
   return (
     <View style={styles.root}>
@@ -87,14 +81,18 @@ export function SearchResultsScreen({ query, onBack, onSelectLocation }: SearchR
 
       <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
         <View style={[styles.header, { paddingTop: Math.max(insets.top, 8) }]}>
-          <StackHeader title="Results" subtitle="Multiple matches found" onBack={onBack} />
+          <StackHeader
+            title="Results"
+            subtitle="Choose a campus destination"
+            onBack={onBack}
+          />
         </View>
 
         <View style={styles.content}>
           <View style={styles.contextBlock}>
-            <Text style={styles.contextCaption}>I found multiple results</Text>
+            <Text style={styles.contextCaption}>Campus destinations</Text>
             <Text style={styles.contextHeading}>
-              {query ? `Which "${query}" do you mean?` : "Which location do you mean?"}
+              {query ? `Matches for "${query}"` : "Where would you like to go?"}
             </Text>
           </View>
 
@@ -103,43 +101,84 @@ export function SearchResultsScreen({ query, onBack, onSelectLocation }: SearchR
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 18 }}
           >
-            {defaultResults.map((result) => {
-              const selected = selectedId === result.id;
+            {locations.map((location) => {
+              const selected = selectedId === location.id;
+              const distance = currentCoordinate
+                ? Math.round(
+                    distanceBetweenCoordinates(currentCoordinate, {
+                      latitude: location.latitude,
+                      longitude: location.longitude,
+                    }),
+                  )
+                : undefined;
+
               return (
                 <Pressable
-                  key={result.id}
-                  onPress={() => handleLocationTap(result)}
+                  key={location.id}
+                  onPress={() => {
+                    setSelectedId(location.id);
+                    onSelectLocation(location.name);
+                  }}
                   style={({ pressed }) => [
                     styles.resultCard,
                     selected && styles.resultCardSelected,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <View style={[styles.resultIconWrap, selected && styles.resultIconWrapSelected]}>
+                  <View
+                    style={[
+                      styles.resultIconWrap,
+                      selected && styles.resultIconWrapSelected,
+                    ]}
+                  >
                     <MapPin size={18} color={selected ? "#22d3ee" : "#94a3b8"} />
                   </View>
 
                   <View style={styles.resultTextWrap}>
-                    <Text style={styles.resultTitle}>{result.name}</Text>
-                    <Text style={styles.resultDescriptor}>{result.descriptor}</Text>
-                    {!!result.distance && <Text style={styles.resultDistance}>{result.distance}</Text>}
+                    <Text style={styles.resultTitle}>{location.name}</Text>
+                    <Text style={styles.resultDescriptor}>
+                      {location.aliases.length
+                        ? location.aliases.join(", ")
+                        : "AAUA campus destination"}
+                    </Text>
+                    {distance !== undefined && (
+                      <Text style={styles.resultDistance}>
+                        {distance} m from your current location
+                      </Text>
+                    )}
                   </View>
 
                   {selected && <View style={styles.selectedDot} />}
                 </Pressable>
               );
             })}
+            {!locations.length && (
+              <Text style={styles.emptyText}>
+                {loadError || (isLoading
+                  ? "Loading campus destinations..."
+                  : "No matching campus destinations were found.")}
+              </Text>
+            )}
           </ScrollView>
 
           <Text style={styles.voiceHint}>
-            {isListening ? "Listening for your choice..." : "You can say the name to choose"}
+            {isListening
+              ? "Listening for your destination..."
+              : transcript || "Say the destination you want"}
           </Text>
 
-          <View style={[styles.voiceButtonWrap, { paddingBottom: 20 + Math.max(insets.bottom, 8) }]}>
+          <View
+            style={[
+              styles.voiceButtonWrap,
+              { paddingBottom: 20 + Math.max(insets.bottom, 8) },
+            ]}
+          >
             <VoiceButton
               isListening={isListening}
-              onPress={handleVoice}
-              accessibilityLabel={isListening ? "Listening, tap to stop" : "Tap to choose by voice"}
+              onPress={handleVoicePress}
+              accessibilityLabel={
+                isListening ? "Listening, tap to stop" : "Tap to choose by voice"
+              }
               size={96}
               iconSize={34}
             />
@@ -175,7 +214,7 @@ const styles = StyleSheet.create({
   },
   contextHeading: {
     color: "#ffffff",
-    fontSize: 28,
+    fontSize: 25,
     textAlign: "center",
   },
   list: {
@@ -235,18 +274,24 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 0 },
   },
+  emptyText: {
+    padding: 14,
+    color: "#fca5a5",
+    fontSize: 14,
+    textAlign: "center",
+  },
   voiceHint: {
     marginTop: 6,
     textAlign: "center",
+    color: "#94a3b8",
     fontSize: 14,
-    color: "#64748b",
   },
   voiceButtonWrap: {
     alignItems: "center",
-    marginTop: 14,
+    paddingTop: 16,
   },
   pressed: {
     opacity: 0.84,
-    transform: [{ scale: 0.98 }],
+    transform: [{ scale: 0.97 }],
   },
 });

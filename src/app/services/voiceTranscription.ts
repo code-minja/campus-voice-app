@@ -1,3 +1,5 @@
+import { File } from "expo-file-system";
+import { fetch } from "expo/fetch";
 import {
   BACKEND_ENDPOINTS,
   getBackendErrorMessage,
@@ -46,15 +48,7 @@ function parseTranscriptionResponse(payload: unknown): string {
 
 function buildAudioFormData(recordingUri: string) {
   const formData = new FormData();
-
-  formData.append(
-    "file",
-    {
-      uri: recordingUri,
-      name: "voice-input.m4a",
-      type: "audio/m4a",
-    } as unknown as Blob,
-  );
+  formData.append("file", new File(recordingUri), "voice-input.m4a");
 
   return formData;
 }
@@ -63,9 +57,7 @@ export async function sendRecordingForTranscription(
   recordingUri: string,
 ): Promise<TranscriptionResult> {
   if (!TRANSCRIPTION_ENDPOINT) {
-    return {
-      text: getBackendSetupHint(),
-    };
+    throw new Error(getBackendSetupHint());
   }
 
   const response = await fetch(TRANSCRIPTION_ENDPOINT, {
@@ -83,10 +75,11 @@ export async function sendRecordingForTranscription(
 
   const payload = (await response.json()) as unknown;
   const text = parseTranscriptionResponse(payload);
+  if (!text.trim() || text === "No speech detected.") {
+    return { text: "No speech detected." };
+  }
 
-  return {
-    text: text || "No speech detected.",
-  };
+  return { text };
 }
 
 export async function streamRecordingForTranscription(
@@ -94,9 +87,7 @@ export async function streamRecordingForTranscription(
   onPartial: TranscriptionStreamCallback,
 ): Promise<TranscriptionResult> {
   if (!TRANSCRIPTION_ENDPOINT) {
-    return {
-      text: getBackendSetupHint(),
-    };
+    throw new Error(getBackendSetupHint());
   }
 
   onPartial("Uploading audio to speech server...");

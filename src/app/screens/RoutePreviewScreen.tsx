@@ -40,7 +40,6 @@ import { speakToUser, clearSpeechQueue } from "../services/voiceFeedback";
 import { streamRecordingForTranscription } from "../services/voiceTranscription";
 import {
   fetchRouteFromBackend,
-  SIMULATED_LOCATION_LABEL,
   type RoutePayload,
 } from "../services/navigationRoute";
 import {
@@ -112,10 +111,10 @@ export function cleanAccessibilityInstruction(instruction: string): string {
 
 type RoutePreviewScreenProps = {
   destination: string;
-  duration: string;
-  distance: string;
   currentLocation: string;
   currentCoordinate?: GeoCoordinates;
+  locationError?: string;
+  onRetryLocation: () => void;
   onBack: () => void;
   onStartNavigation: () => void;
   onCancelVoiceConfirmation: () => void;
@@ -139,11 +138,23 @@ function formatDistanceInFeet(meters: number): string {
 
 function formatDuration(seconds?: number): string {
   if (!seconds || seconds <= 0) {
-    return "a few minutes";
+    return "time unavailable";
   }
 
   const roundedMinutes = Math.max(1, Math.round(seconds / 60));
   return `${roundedMinutes} min walk`;
+}
+
+function formatArrivalTime(seconds: number | undefined, now: Date): string {
+  if (!seconds || seconds <= 0) {
+    return "Arrival time unavailable";
+  }
+
+  const arrival = new Date(now.getTime() + seconds * 1000);
+  return `Arrive ${arrival.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  })}`;
 }
 
 function normalizeUtterance(value: string): string {
@@ -168,10 +179,10 @@ function isCancelIntent(value: string): boolean {
 
 export function RoutePreviewScreen({
   destination,
-  duration,
-  distance,
   currentLocation,
   currentCoordinate,
+  locationError,
+  onRetryLocation,
   onBack,
   onStartNavigation,
   onCancelVoiceConfirmation,
@@ -184,10 +195,28 @@ export function RoutePreviewScreen({
   const [voiceStatus, setVoiceStatus] = useState("");
   const [routePayload, setRoutePayload] = useState<RoutePayload | null>(null);
   const [routeLoadError, setRouteLoadError] = useState<string>("");
+  const [routeRetryCount, setRouteRetryCount] = useState(0);
+  const [currentTime, setCurrentTime] = useState(() => new Date());
+  const routeRequestRef = useRef({ destination: "", started: false });
   const isTransitioningRef = useRef(false);
   const isMountedRef = useRef(true);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+
+  useEffect(() => {
+    if (!currentCoordinate && locationError) {
+      setRouteLoadError(locationError);
+    } else if (currentCoordinate) {
+      setRouteLoadError((error) =>
+        error === locationError ? "" : error,
+      );
+    }
+  }, [currentCoordinate, locationError]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   const directionSteps = useMemo(() => {
     if (!routePayload?.steps?.length) {
@@ -212,11 +241,19 @@ export function RoutePreviewScreen({
 
   const effectiveDistance = routePayload
     ? formatDistanceInFeet(routePayload.total_distance_meters)
-    : distance;
-
+    : routeLoadError
+      ? "Unavailable"
+      : "Calculating...";
   const effectiveDuration = routePayload
     ? formatDuration(routePayload.estimated_duration_seconds)
-    : duration;
+    : routeLoadError
+      ? "Unavailable"
+      : "Calculating...";
+  const estimatedArrival = routePayload
+    ? formatArrivalTime(routePayload.estimated_duration_seconds, currentTime)
+    : routeLoadError
+      ? "Arrival unavailable"
+      : "Calculating arrival...";
 
   const summaryText = routeLoadError
     ? routeLoadError
@@ -238,22 +275,10 @@ export function RoutePreviewScreen({
     }));
   }, [routePayload]);
 
-  const mapOriginCoordinate = routePayload?.origin ?? currentCoordinate;
-  const mapCurrentLocation = routePayload?.simulated
-    ? SIMULATED_LOCATION_LABEL
-    : currentLocation;
-
-  const mapDestinationCoordinate = useMemo<LatLng | undefined>(() => {
-    const coordinate = routePayload?.destination?.coordinate;
-    if (!coordinate) {
-      return undefined;
-    }
-
-    return {
-      latitude: coordinate.latitude,
-      longitude: coordinate.longitude,
-    };
-  }, [routePayload]);
+  const mapOriginCoordinate = currentCoordinate ?? routePayload?.origin;
+  const mapCurrentLocation = currentCoordinate
+    ? `My location — ${currentLocation}`
+    : locationError || currentLocation;
 
   const maxSheetHeight = Math.min(Math.max(height * 0.82, 440), 700);
   const minVisibleHeight = Math.min(340, maxSheetHeight - 180);
@@ -463,10 +488,19 @@ export function RoutePreviewScreen({
   };
 
   useEffect(() => {
-    let cancelled = false;
+    if (routeRequestRef.current.destination !== destination) {
+      routeRequestRef.current = { destination, started: false };
+      setRoutePayload(null);
+      setRouteLoadError(currentCoordinate ? "" : locationError ?? "");
+    }
+
     if (!destination.trim()) {
       return;
     }
+    if (!currentCoordinate || routeRequestRef.current.started) {
+      return;
+    }
+    routeRequestRef.current.started = true;
     clearSpeechQueue();
 
     void (async () => {
@@ -476,7 +510,10 @@ export function RoutePreviewScreen({
           currentCoordinate,
           destination,
         );
-        if (!cancelled) {
+        if (
+          isMountedRef.current &&
+          routeRequestRef.current.destination === destination
+        ) {
           setRoutePayload(payload);
 
           const durationText = formatDuration(payload.estimated_duration_seconds);
@@ -485,25 +522,34 @@ export function RoutePreviewScreen({
 
           await speakToUser(initialText);
 
-          if (!cancelled && isMountedRef.current) {
+          if (
+            isMountedRef.current &&
+            routeRequestRef.current.destination === destination
+          ) {
             void startConfirmationListening();
           }
         }
       } catch (error) {
-        if (!cancelled) {
+        if (
+          isMountedRef.current &&
+          routeRequestRef.current.destination === destination
+        ) {
+          routeRequestRef.current.started = false;
           setRoutePayload(null);
-          setRouteLoadError(
-            error instanceof Error ? error.message : "Failed to load route",
-          );
+          const message =
+            error instanceof Error ? error.message : "Failed to load route";
+          setRouteLoadError(message);
+          void speakToUser(message);
         }
       }
     })();
-
-    return () => {
-      cancelled = true;
-      clearConfirmTimeout();
-    };
-  }, [currentCoordinate, destination]);
+  }, [
+    currentCoordinate?.latitude,
+    currentCoordinate?.longitude,
+    destination,
+    locationError,
+    routeRetryCount,
+  ]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -524,7 +570,6 @@ export function RoutePreviewScreen({
         currentLocation={mapCurrentLocation}
         currentCoordinate={mapOriginCoordinate}
         routeWaypoints={mapRouteWaypoints}
-        destinationCoordinateOverride={mapDestinationCoordinate}
       />
 
       {isListening && (
@@ -655,7 +700,7 @@ export function RoutePreviewScreen({
                   <View style={styles.metaRow}>
                     <View style={styles.metaItem}>
                       <Clock size={14} color="#94a3b8" />
-                      <Text style={styles.metaText}>{effectiveDuration}</Text>
+                      <Text style={styles.metaText}>{estimatedArrival}</Text>
                     </View>
                     <Text style={styles.metaBullet}>•</Text>
                     <Text style={styles.metaText}>{effectiveDistance}</Text>
@@ -680,7 +725,13 @@ export function RoutePreviewScreen({
                 </View>
                 <View style={styles.summaryTextWrap}>
                   <Text style={styles.summaryText}>
-                    {isListening ? "Listening for confirmation..." : `You are ${effectiveDuration} away from ${destination}`}
+                    {isListening
+                      ? "Listening for confirmation..."
+                      : routePayload
+                        ? `${effectiveDuration} away from ${destination}`
+                        : routeLoadError
+                          ? "Route unavailable"
+                          : `Calculating route to ${destination}...`}
                   </Text>
                   <Text style={[styles.summarySubText, isListening && styles.summarySubTextActive]}>
                     {summaryText}
@@ -688,13 +739,34 @@ export function RoutePreviewScreen({
                 </View>
               </View>
             </Pressable>
+            {!!routeLoadError && (
+              <Pressable
+                onPress={() => {
+                  if (!currentCoordinate && locationError) {
+                    onRetryLocation();
+                  } else {
+                    setRouteRetryCount((count) => count + 1);
+                  }
+                }}
+                accessibilityRole="button"
+                style={styles.retryButton}
+              >
+                <Text style={styles.retryButtonText}>
+                  {!currentCoordinate && locationError
+                    ? "Retry location access"
+                    : "Retry route request"}
+                </Text>
+              </Pressable>
+            )}
           </ScrollView>
 
           <View style={styles.footerActionWrap}>
             <Pressable
               onPress={onStartNavigation}
+              disabled={!routePayload}
               style={(state: InteractiveState) => [
                 styles.startButton,
+                !routePayload && styles.startButtonDisabled,
                 (state.focused || state.hovered || state.pressed) &&
                   styles.startButtonRing,
                 state.pressed && styles.pressed,
@@ -988,6 +1060,19 @@ const styles = StyleSheet.create({
     backgroundColor: "#0ea5e9",
     paddingVertical: 15,
     alignItems: "center",
+  },
+  startButtonDisabled: {
+    opacity: 0.45,
+  },
+  retryButton: {
+    alignSelf: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  retryButtonText: {
+    color: "#22d3ee",
+    fontSize: 15,
+    fontWeight: "600",
   },
   startButtonRing: {
     shadowColor: "#22d3ee",

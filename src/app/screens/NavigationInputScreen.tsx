@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Pressable,
   ScrollView,
@@ -8,73 +8,71 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { Clock, MapPin, Search } from "lucide-react-native";
+import { Search } from "lucide-react-native";
 import { MapBackground } from "../components/MapBackground";
 import { StackHeader } from "../components/StackHeader";
-import { SuggestionChips } from "../components/SuggestionChips";
 import { VoiceButton } from "../components/VoiceButton";
 import { VoiceWaveIndicator } from "../components/VoiceWaveIndicator";
+import { useVoiceNavigation } from "../hooks/useVoiceNavigation";
+import {
+  getCampusLocations,
+  type CampusLocation,
+} from "../services/campusLocations";
 
 type NavigationInputScreenProps = {
   onBack: () => void;
   onSelectDestination: (destination: string) => void;
-  onAmbiguousResults: (query?: string) => void;
   onShowError: () => void;
 };
-
-const recentLocations = ["Library", "ETF", "Hostel"];
-const suggestedDestinations = ["Student Center", "Gym", "Cafeteria"];
 
 export function NavigationInputScreen({
   onBack,
   onSelectDestination,
-  onAmbiguousResults,
   onShowError,
 }: NavigationInputScreenProps) {
   const insets = useSafeAreaInsets();
-  const [isListening, setIsListening] = useState(false);
   const [searchValue, setSearchValue] = useState("");
-  const timeoutHandles = useRef<ReturnType<typeof setTimeout>[]>([]);
-
-  const locations = [...recentLocations, ...suggestedDestinations];
-  const filtered = locations.filter((item) =>
-    item.toLowerCase().includes(searchValue.toLowerCase()),
-  );
-
-  const clearPendingTimeouts = () => {
-    timeoutHandles.current.forEach((handle) => clearTimeout(handle));
-    timeoutHandles.current = [];
-  };
+  const [locations, setLocations] = useState<CampusLocation[]>([]);
+  const [locationsError, setLocationsError] = useState("");
+  const { isListening, transcript, handleVoicePress } = useVoiceNavigation({
+    onStartVoiceNavigation: onSelectDestination,
+  });
 
   useEffect(() => {
+    let cancelled = false;
+    void getCampusLocations()
+      .then((result) => {
+        if (!cancelled) {
+          setLocations(result);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLocationsError(
+            error instanceof Error
+              ? error.message
+              : "Unable to load campus destinations.",
+          );
+        }
+      });
+
     return () => {
-      clearPendingTimeouts();
+      cancelled = true;
     };
   }, []);
 
-  const handleVoicePress = () => {
-    clearPendingTimeouts();
-
-    if (isListening) {
-      setIsListening(false);
-      return;
+  const filtered = useMemo(() => {
+    const query = searchValue.trim().toLowerCase();
+    if (!query) {
+      return locations;
     }
 
-    setIsListening(true);
-    const handle = setTimeout(() => {
-      setSearchValue("Library");
-      setIsListening(false);
-      onAmbiguousResults("Library");
-    }, 2000);
-
-    timeoutHandles.current.push(handle);
-  };
-
-  const handleLocationPress = (location: string) => {
-    setSearchValue(location);
-    const handle = setTimeout(() => onSelectDestination(location), 250);
-    timeoutHandles.current.push(handle);
-  };
+    return locations.filter((location) =>
+      [location.name, ...location.aliases].some((name) =>
+        name.toLowerCase().includes(query),
+      ),
+    );
+  }, [locations, searchValue]);
 
   return (
     <View style={styles.root}>
@@ -82,7 +80,11 @@ export function NavigationInputScreen({
 
       <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
         <View style={[styles.header, { paddingTop: Math.max(insets.top, 8) }]}>
-          <StackHeader title="Navigate" subtitle="Voice or type to navigate" onBack={onBack} />
+          <StackHeader
+            title="Navigate"
+            subtitle="Voice or type to navigate"
+            onBack={onBack}
+          />
         </View>
 
         <View style={styles.content}>
@@ -103,71 +105,62 @@ export function NavigationInputScreen({
             <VoiceButton
               isListening={isListening}
               onPress={handleVoicePress}
-              accessibilityLabel={isListening ? "Listening, tap to stop" : "Tap to speak"}
+              accessibilityLabel={
+                isListening ? "Listening, tap to stop" : "Tap to speak"
+              }
             />
-            <Text style={styles.hint}>{isListening ? "Listening..." : "Tap to speak"}</Text>
+            <Text style={styles.hint}>
+              {isListening ? "Listening..." : transcript || "Tap to speak"}
+            </Text>
           </View>
 
           <ScrollView
             style={styles.listSection}
             showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ paddingBottom: 24 + Math.max(insets.bottom, 8) }}
+            contentContainerStyle={{
+              paddingBottom: 24 + Math.max(insets.bottom, 8),
+            }}
           >
-            {!searchValue ? (
-              <>
-                <View style={styles.recentSection}>
-                  <View style={styles.recentHeadingRow}>
-                    <Clock size={16} color="#64748b" />
-                    <Text style={styles.sectionLabel}>Recent locations</Text>
-                  </View>
-
-                  {recentLocations.map((location) => (
-                    <Pressable
-                      key={location}
-                      onPress={() => handleLocationPress(location)}
-                      style={({ pressed }) => [styles.recentItem, pressed && styles.pressed]}
-                    >
-                      <View style={styles.recentItemIconWrap}>
-                        <MapPin size={18} color="#22d3ee" />
-                      </View>
-                      <Text style={styles.recentItemText}>{location}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-
-                <View style={styles.suggestionSection}>
-                  <Text style={styles.sectionLabel}>Suggested destinations</Text>
-                  <SuggestionChips
-                    suggestions={suggestedDestinations}
-                    onSuggestionPress={handleLocationPress}
-                  />
-                </View>
-              </>
-            ) : (
-              <View>
-                <Text style={styles.sectionLabel}>Search results</Text>
-                {filtered.length ? (
-                  filtered.map((location) => (
-                    <Pressable
-                      key={location}
-                      onPress={() => handleLocationPress(location)}
-                      style={({ pressed }) => [styles.searchResultItem, pressed && styles.pressed]}
-                    >
-                      <Text style={styles.searchResultText}>{location}</Text>
-                    </Pressable>
-                  ))
-                ) : (
-                  <View style={styles.emptyWrap}>
-                    <Text style={styles.emptyText}>No results found for "{searchValue}".</Text>
-                    <Pressable
-                      onPress={onShowError}
-                      style={({ pressed }) => [styles.errorButton, pressed && styles.pressed]}
-                    >
-                      <Text style={styles.errorButtonText}>Show route help</Text>
-                    </Pressable>
-                  </View>
-                )}
+            <Text style={styles.sectionLabel}>
+              {searchValue ? "Search results" : "Campus destinations"}
+            </Text>
+            {!!locationsError && (
+              <View style={styles.emptyWrap}>
+                <Text style={styles.emptyText}>{locationsError}</Text>
+                <Pressable
+                  onPress={onShowError}
+                  style={({ pressed }) => [
+                    styles.errorButton,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.errorButtonText}>Show route help</Text>
+                </Pressable>
               </View>
+            )}
+            {filtered.map((location) => (
+              <Pressable
+                key={location.id}
+                onPress={() => onSelectDestination(location.name)}
+                style={({ pressed }) => [
+                  styles.searchResultItem,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.searchResultText}>{location.name}</Text>
+                {!!location.aliases.length && (
+                  <Text style={styles.resultAliases}>
+                    {location.aliases.join(", ")}
+                  </Text>
+                )}
+              </Pressable>
+            ))}
+            {!locationsError && filtered.length === 0 && (
+              <Text style={styles.emptyText}>
+                {locations.length
+                  ? `No campus destination matches "${searchValue}".`
+                  : "Loading campus destinations..."}
+              </Text>
             )}
           </ScrollView>
         </View>
@@ -214,51 +207,17 @@ const styles = StyleSheet.create({
   },
   hint: {
     marginTop: 14,
-    color: "#64748b",
+    color: "#94a3b8",
     fontSize: 14,
+    textAlign: "center",
   },
   listSection: {
     flex: 1,
-  },
-  recentSection: {
-    marginBottom: 24,
-  },
-  recentHeadingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 12,
   },
   sectionLabel: {
     marginBottom: 10,
     fontSize: 14,
     color: "#94a3b8",
-  },
-  recentItem: {
-    marginBottom: 8,
-    flexDirection: "row",
-    alignItems: "center",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "rgba(51, 65, 85, 0.6)",
-    backgroundColor: "rgba(30, 41, 59, 0.45)",
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  recentItemIconWrap: {
-    height: 38,
-    width: 38,
-    borderRadius: 999,
-    backgroundColor: "rgba(34, 211, 238, 0.12)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  recentItemText: {
-    marginLeft: 12,
-    color: "#e2e8f0",
-    fontSize: 15,
-  },
-  suggestionSection: {
-    marginBottom: 20,
   },
   searchResultItem: {
     marginBottom: 8,
@@ -273,6 +232,11 @@ const styles = StyleSheet.create({
     color: "#e2e8f0",
     fontSize: 15,
   },
+  resultAliases: {
+    marginTop: 4,
+    color: "#94a3b8",
+    fontSize: 12,
+  },
   emptyWrap: {
     borderRadius: 14,
     borderWidth: 1,
@@ -283,6 +247,7 @@ const styles = StyleSheet.create({
   emptyText: {
     color: "#fca5a5",
     fontSize: 14,
+    paddingVertical: 8,
   },
   errorButton: {
     marginTop: 10,
