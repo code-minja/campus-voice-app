@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import MapView, { LatLng, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
+import MapView, { LatLng, Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import { Navigation } from "lucide-react-native";
 import type { GeoCoordinates } from "../types";
+import { getCampusLocations, type CampusLocation } from "../services/campusLocations";
 import { AAUA_CAMPUS_BOUNDS } from "./campusMapBounds";
 
 type GoogleRouteMapProps = {
@@ -77,7 +78,28 @@ export function GoogleRouteMap({
   const [isUserTracking, setIsUserTracking] = useState(true);
   const [isMapReady, setIsMapReady] = useState(false);
   const [currentHeading, setCurrentHeading] = useState(0);
+  const [campusLocations, setCampusLocations] = useState<CampusLocation[]>([]);
+  const [locationsError, setLocationsError] = useState("");
   const prevCoordRef = useRef<GeoCoordinates | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCampusLocations().then((locations) => {
+      if (!cancelled) {
+        setCampusLocations(locations);
+      }
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        setLocationsError(
+          error instanceof Error ? error.message : "Unable to load campus locations.",
+        );
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (currentCoordinate && prevCoordRef.current) {
@@ -170,6 +192,27 @@ export function GoogleRouteMap({
           }
         }}
       >
+        {campusLocations.map((location) => (
+          <Marker
+            key={location.id}
+            coordinate={{
+              latitude: location.latitude,
+              longitude: location.longitude,
+            }}
+            anchor={{ x: 0.5, y: 1 }}
+            title={location.name}
+            tracksViewChanges={false}
+          >
+            <View style={styles.locationMarker}>
+              <View style={styles.locationLabel}>
+                <Text numberOfLines={1} style={styles.locationLabelText}>
+                  {location.name}
+                </Text>
+              </View>
+              <View style={styles.locationPointer} />
+            </View>
+          </Marker>
+        ))}
         {routeWaypoints && routeWaypoints.length >= 2 && (
           <Polyline
             coordinates={routeCoordinates}
@@ -183,6 +226,13 @@ export function GoogleRouteMap({
       </MapView>
 
       <View pointerEvents="none" style={styles.mapOverlayTop} />
+      {!!locationsError && (
+        <View style={styles.locationError}>
+          <Text style={styles.locationErrorText}>
+            Campus labels unavailable: {locationsError}
+          </Text>
+        </View>
+      )}
       <View
         pointerEvents="none"
         style={[
@@ -235,6 +285,47 @@ const styles = StyleSheet.create({
     right: 0,
     height: 90,
     backgroundColor: "rgba(2, 6, 23, 0.12)",
+  },
+  locationLabel: {
+    maxWidth: 180,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(34, 211, 238, 0.75)",
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    backgroundColor: "rgba(15, 23, 42, 0.88)",
+  },
+  locationMarker: {
+    alignItems: "center",
+  },
+  locationLabelText: {
+    color: "#f8fafc",
+    fontSize: 9,
+    fontWeight: "700",
+  },
+  locationPointer: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 5,
+    borderRightWidth: 5,
+    borderTopWidth: 6,
+    borderLeftColor: "transparent",
+    borderRightColor: "transparent",
+    borderTopColor: "rgba(34, 211, 238, 0.95)",
+  },
+  locationError: {
+    position: "absolute",
+    top: 42,
+    right: 12,
+    maxWidth: "80%",
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    backgroundColor: "rgba(127, 29, 29, 0.9)",
+  },
+  locationErrorText: {
+    color: "#fee2e2",
+    fontSize: 11,
   },
   mapOverlayBottom: {
     position: "absolute",

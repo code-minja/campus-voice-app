@@ -78,7 +78,7 @@ export function VoiceOnlyModeScreen({
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
 
   const lastSpokenStepIndex = useRef<number>(-1);
-  const timeoutHandles = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const speechSequenceRef = useRef(0);
   const isRecalculatingRef = useRef(false);
   const routeRequestRef = useRef({ destination: "", started: false });
   const isMountedRef = useRef(true);
@@ -141,13 +141,12 @@ export function VoiceOnlyModeScreen({
     routeRetryCount,
   ]);
 
-  // Clean up timers on unmount
+  // Stop queued speech on unmount.
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      timeoutHandles.current.forEach((h) => clearTimeout(h));
-      timeoutHandles.current = [];
+      speechSequenceRef.current += 1;
       clearSpeechQueue();
     };
   }, []);
@@ -217,7 +216,16 @@ export function VoiceOnlyModeScreen({
     if (currentStepIndex !== lastSpokenStepIndex.current) {
       const step = routePayload.steps[currentStepIndex];
       const cleanInstruction = cleanAccessibilityInstruction(step.instruction);
-      void speakToUser(cleanInstruction);
+      const speechSequence = ++speechSequenceRef.current;
+      setVoiceState("speaking");
+      void speakToUser(cleanInstruction).finally(() => {
+        if (
+          isMountedRef.current &&
+          speechSequenceRef.current === speechSequence
+        ) {
+          setVoiceState("idle");
+        }
+      });
       lastSpokenStepIndex.current = currentStepIndex;
 
       // Prefetch next step audio
@@ -229,11 +237,6 @@ export function VoiceOnlyModeScreen({
           ),
         );
 
-      setVoiceState("speaking");
-      const words = cleanInstruction.split(" ").length;
-      const estimateMs = Math.max(1500, (words / 2.8) * 1000);
-      const handle = setTimeout(() => setVoiceState("idle"), estimateMs);
-      timeoutHandles.current.push(handle);
     }
   }, [currentStepIndex, routePayload]);
 

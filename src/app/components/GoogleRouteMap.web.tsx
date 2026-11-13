@@ -1,6 +1,7 @@
 import { createElement, useEffect, useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import type { GeoCoordinates } from "../types";
+import { getCampusLocations, type CampusLocation } from "../services/campusLocations";
 import { AAUA_CAMPUS_BOUNDS } from "./campusMapBounds";
 
 type GoogleRouteMapProps = {
@@ -31,6 +32,21 @@ type GoogleMapsPolyline = {
   setPath: (path: GoogleMapsPoint[]) => void;
 };
 
+type GoogleMapsAdvancedMarker = {
+  map: GoogleMapsMap | null;
+};
+
+type GoogleMapsMarkerLibrary = {
+  AdvancedMarkerElement: new (options: {
+    map: GoogleMapsMap;
+    position: GoogleMapsPoint;
+    title: string;
+    content: HTMLElement;
+    anchorLeft: string;
+    anchorTop: string;
+  }) => GoogleMapsAdvancedMarker;
+};
+
 type GoogleMapsApi = {
   Map: new (
     element: HTMLElement,
@@ -51,6 +67,7 @@ type GoogleMapsApi = {
     },
   ) => GoogleMapsMap;
   LatLngBounds: new () => GoogleMapsBounds;
+  importLibrary: (library: "marker") => Promise<GoogleMapsMarkerLibrary>;
   Polyline: new (options: {
     map: GoogleMapsMap;
     path: GoogleMapsPoint[];
@@ -152,11 +169,32 @@ export function GoogleRouteMap({
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<GoogleMapsMap | null>(null);
   const routeLineRef = useRef<GoogleMapsPolyline | null>(null);
+  const locationMarkersRef = useRef<GoogleMapsAdvancedMarker[]>([]);
   const mapsApiRef = useRef<LoadedGoogleMaps | null>(null);
   const [isMapReady, setIsMapReady] = useState(false);
   const [mapError, setMapError] = useState("");
+  const [campusLocations, setCampusLocations] = useState<CampusLocation[]>([]);
 
   const origin = currentCoordinate ?? routeWaypoints?.[0];
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCampusLocations().then((locations) => {
+      if (!cancelled) {
+        setCampusLocations(locations);
+      }
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        setMapError(
+          error instanceof Error ? error.message : "Unable to load campus locations.",
+        );
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,10 +242,73 @@ export function GoogleRouteMap({
       window.removeEventListener(authFailureEvent, handleAuthFailure);
       routeLineRef.current?.setMap(null);
       routeLineRef.current = null;
+      locationMarkersRef.current.forEach((marker) => {
+        marker.map = null;
+      });
+      locationMarkersRef.current = [];
       mapsApiRef.current = null;
       mapRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const loadedMaps = mapsApiRef.current;
+    if (!isMapReady || !map || !loadedMaps || !campusLocations.length) {
+      return;
+    }
+
+    let cancelled = false;
+    void loadedMaps.maps.importLibrary("marker").then(({ AdvancedMarkerElement }) => {
+      if (cancelled) {
+        return;
+      }
+
+      locationMarkersRef.current.forEach((marker) => {
+        marker.map = null;
+      });
+      locationMarkersRef.current = campusLocations.map((location) => {
+        const markerContent = document.createElement("div");
+        markerContent.style.cssText =
+          "display:flex;flex-direction:column;align-items:center";
+        const label = document.createElement("div");
+        label.textContent = location.name;
+        label.title = location.name;
+        label.style.cssText =
+          "max-width:180px;padding:3px 6px;border:1px solid rgba(34,211,238,.75);" +
+          "border-radius:5px;background:rgba(15,23,42,.9);color:#f8fafc;" +
+          "font:700 11px sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+        const pointer = document.createElement("div");
+        pointer.style.cssText =
+          "width:0;height:0;border-left:5px solid transparent;" +
+          "border-right:5px solid transparent;border-top:6px solid rgba(34,211,238,.95)";
+        markerContent.append(label, pointer);
+
+        return new AdvancedMarkerElement({
+          map,
+          position: toGoogleMapsPoint(location),
+          title: location.name,
+          content: markerContent,
+          anchorLeft: "-50%",
+          anchorTop: "-100%",
+        });
+      });
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        setMapError(
+          error instanceof Error ? error.message : "Unable to display campus locations.",
+        );
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      locationMarkersRef.current.forEach((marker) => {
+        marker.map = null;
+      });
+      locationMarkersRef.current = [];
+    };
+  }, [campusLocations, isMapReady]);
 
   useEffect(() => {
     const map = mapRef.current;

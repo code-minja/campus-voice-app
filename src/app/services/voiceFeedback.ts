@@ -6,13 +6,9 @@ import { File, Paths } from "expo-file-system";
 import * as Speech from "expo-speech";
 import { BACKEND_ENDPOINTS, getBackendErrorMessage } from "./backendConfig";
 
-const wait = (ms: number) =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
 let backendTtsPlayer: AudioPlayer | null = null;
 let backendTtsRequestVersion = 0;
+let cancelBackendTtsPlayback: (() => void) | null = null;
 type QueueItem = {
   text: string;
   resolve: () => void;
@@ -20,15 +16,21 @@ type QueueItem = {
 
 const speechQueue: QueueItem[] = [];
 let isSpeaking = false;
+let speechQueueVersion = 0;
 
 export type VoiceSpeaker = (message: string) => Promise<void>;
 
 const clearBackendTtsPlayer = () => {
+  const cancelPlayback = cancelBackendTtsPlayback;
+  cancelBackendTtsPlayback = null;
+  cancelPlayback?.();
   backendTtsPlayer?.remove();
   backendTtsPlayer = null;
 };
 
 export function clearSpeechQueue() {
+  speechQueueVersion += 1;
+  backendTtsRequestVersion += 1;
   speechQueue.forEach(item => item.resolve());
   speechQueue.length = 0;
   isSpeaking = false;
@@ -81,7 +83,7 @@ export async function prefetchAudio(message: string): Promise<void> {
       },
       body: JSON.stringify({
         text,
-        voice: "af_bella"
+        format: "wav",
       }),
     });
 
@@ -116,7 +118,7 @@ async function playBackendTts(message: string): Promise<boolean> {
       },
       body: JSON.stringify({
         text: message,
-        voice: "af_bella"
+        format: "wav",
       }),
     });
 
@@ -146,16 +148,54 @@ async function playBackendTts(message: string): Promise<boolean> {
     interruptionMode: "doNotMix",
   });
 
+  if (currentRequestVersion !== backendTtsRequestVersion) {
+    return true;
+  }
+
   clearBackendTtsPlayer();
   const player = createAudioPlayer({ uri: fileUri });
   backendTtsPlayer = player;
-  player.play();
 
-  const words = message.trim().split(/\s+/).filter(Boolean).length;
-  const estimatedMs = Math.min(12000, Math.max(900, Math.round((words / 2.8) * 1000) + 400));
-  await wait(estimatedMs);
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    let subscription: { remove: () => void } | undefined;
 
-  return true;
+    const settle = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      subscription?.remove();
+      if (cancelBackendTtsPlayback === cancelPlayback) {
+        cancelBackendTtsPlayback = null;
+      }
+      if (backendTtsPlayer === player) {
+        backendTtsPlayer = null;
+      }
+      player.remove();
+      if (error) {
+        reject(error);
+      } else {
+        resolve(true);
+      }
+    };
+
+    const cancelPlayback = () => settle();
+    cancelBackendTtsPlayback = cancelPlayback;
+    subscription = player.addListener("playbackStatusUpdate", (playbackStatus) => {
+      if (playbackStatus.error) {
+        settle(new Error(playbackStatus.error));
+      } else if (playbackStatus.didJustFinish) {
+        settle();
+      }
+    });
+
+    try {
+      player.play();
+    } catch (error) {
+      settle(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
 }
 
 async function speakWithDeviceTts(message: string) {
@@ -171,6 +211,7 @@ async function speakWithDeviceTts(message: string) {
       onError: (error) => reject(error),
     });
   }).catch(() => {
+    console.warn("Device text-to-speech failed; announcing through accessibility.");
     AccessibilityInfo.announceForAccessibility(message);
   });
 }
@@ -184,7 +225,7 @@ const defaultSpeaker: VoiceSpeaker = async (message: string) => {
       return;
     }
   } catch {
-    // noop: fallback to device TTS below
+    console.warn("Backend TTS failed; falling back to device text-to-speech.");
   }
 
   await speakWithDeviceTts(message);
@@ -202,6 +243,7 @@ async function processQueue() {
   }
 
   isSpeaking = true;
+  const processingVersion = speechQueueVersion;
   const nextItem = speechQueue.shift();
   if (nextItem) {
     try {
@@ -213,6 +255,9 @@ async function processQueue() {
     }
   }
 
+  if (processingVersion !== speechQueueVersion) {
+    return;
+  }
   isSpeaking = false;
   // Process the next item in the queue
   void processQueue();
