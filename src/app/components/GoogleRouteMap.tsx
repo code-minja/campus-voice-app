@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import MapView, { LatLng, Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import { Navigation } from "lucide-react-native";
 import type { GeoCoordinates } from "../types";
@@ -51,6 +51,61 @@ function getRegionFromRoute(points: LatLng[]) {
   };
 }
 
+// The preview sheet covers the lower part of the screen and the header the top,
+// so the route is fitted into the space that is actually visible.
+const PREVIEW_EDGE_PADDING = { top: 120, right: 100, bottom: 300, left: 100 };
+
+function getPreviewCamera(
+  points: LatLng[],
+  heading: number,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  const lats = points.map((point) => point.latitude);
+  const lngs = points.map((point) => point.longitude);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const midLat = (minLat + maxLat) / 2;
+
+  // Convert latitude span to "equator degrees" so both spans share the same
+  // pixel scale in Web Mercator (this campus is close to the equator).
+  const latScale = 1 / Math.max(Math.cos((midLat * Math.PI) / 180), 0.01);
+  const widthDeg = Math.max(maxLng - minLng, 0.0001);
+  const heightDeg = Math.max((maxLat - minLat) * latScale, 0.0001);
+
+  // Account for the preview heading: rotating the route grows the axis-aligned
+  // area that has to fit on screen.
+  const radians = (heading * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(radians));
+  const sin = Math.abs(Math.sin(radians));
+  const rotatedWidth = widthDeg * cos + heightDeg * sin;
+  const rotatedHeight = widthDeg * sin + heightDeg * cos;
+
+  const availableWidth = Math.max(
+    viewportWidth - PREVIEW_EDGE_PADDING.left - PREVIEW_EDGE_PADDING.right,
+    120,
+  );
+  const availableHeight = Math.max(
+    viewportHeight - PREVIEW_EDGE_PADDING.top - PREVIEW_EDGE_PADDING.bottom,
+    120,
+  );
+
+  // At zoom z, one degree spans (256 * 2^z) / 360 pixels.
+  const zoomForWidth = Math.log2((availableWidth * 360) / (256 * rotatedWidth));
+  const zoomForHeight = Math.log2((availableHeight * 360) / (256 * rotatedHeight));
+  const zoom = Math.min(
+    Math.min(zoomForWidth, zoomForHeight) - 0.25,
+    20,
+  );
+
+  return {
+    center: { latitude: midLat, longitude: (minLng + maxLng) / 2 },
+    zoom: Math.max(zoom, 12),
+  };
+}
+
 export function GoogleRouteMap({
   currentCoordinate,
   routeWaypoints,
@@ -58,6 +113,7 @@ export function GoogleRouteMap({
   showBadge = true,
 }: GoogleRouteMapProps) {
   const mapRef = useRef<MapView | null>(null);
+  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
 
   const routeOrigin = useMemo<LatLng | undefined>(
     () =>
@@ -143,6 +199,31 @@ export function GoogleRouteMap({
     return 0;
   }, [routeCoordinates]);
 
+  const fitRouteInView = useCallback(
+    (animated: boolean) => {
+      const map = mapRef.current;
+      if (!map || routeCoordinates.length < 2) {
+        return;
+      }
+
+      // One camera update keeps the fitted zoom and the preview heading in
+      // sync. Two separate animations race and can restore the pre-fit zoom.
+      const camera = getPreviewCamera(
+        routeCoordinates,
+        previewHeading,
+        viewportWidth,
+        viewportHeight,
+      );
+      map.animateCamera(
+        { ...camera, heading: previewHeading, pitch: 0 },
+        // animateCamera maps duration 0 to 500 ms internally, so use 1 ms
+        // when a snap is wanted.
+        { duration: animated ? 350 : 1 },
+      );
+    },
+    [routeCoordinates, previewHeading, viewportWidth, viewportHeight],
+  );
+
   useEffect(() => {
     if (!mapRef.current || !isMapReady) {
       return;
@@ -167,22 +248,8 @@ export function GoogleRouteMap({
       return;
     }
 
-    if (mode === "preview" && routeWaypoints && routeWaypoints.length >= 2) {
-      mapRef.current.fitToCoordinates(routeCoordinates, {
-        edgePadding: { top: 90, right: 60, bottom: 260, left: 60 },
-        animated: true,
-      });
-      // Orient preview map toward the route direction after fitting.
-      setTimeout(() => {
-        if (!mapRef.current || !isUserTracking) return;
-        mapRef.current.animateCamera(
-          {
-            heading: previewHeading,
-            pitch: 0,
-          },
-          { duration: 350 },
-        );
-      }, 350);
+    if (mode === "preview" && routeCoordinates.length >= 2) {
+      fitRouteInView(true);
       return;
     }
 
@@ -204,10 +271,10 @@ export function GoogleRouteMap({
     currentCoordinate,
     mode,
     routeCoordinates,
-    routeWaypoints,
     currentHeading,
     isUserTracking,
     isMapReady,
+    fitRouteInView,
     previewHeading,
     startCoordinate,
   ]);
@@ -219,8 +286,8 @@ export function GoogleRouteMap({
         style={StyleSheet.absoluteFill}
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : undefined}
         initialRegion={region}
-        mapType={Platform.OS === "android" ? "satellite" : "standard"}
-        minZoomLevel={14}
+        mapType="satellite"
+        minZoomLevel={12}
         maxZoomLevel={20}
         scrollEnabled
         zoomEnabled
@@ -312,17 +379,8 @@ export function GoogleRouteMap({
               return;
             }
 
-            if (routeWaypoints && routeWaypoints.length >= 2) {
-              mapRef.current.fitToCoordinates(routeCoordinates, {
-                edgePadding: { top: 90, right: 60, bottom: 260, left: 60 },
-                animated: true,
-              });
-              setTimeout(() => {
-                mapRef.current?.animateCamera(
-                  { heading: previewHeading, pitch: 0 },
-                  { duration: 300 },
-                );
-              }, 300);
+            if (routeCoordinates.length >= 2) {
+              fitRouteInView(true);
               return;
             }
 
