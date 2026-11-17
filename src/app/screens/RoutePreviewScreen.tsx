@@ -16,7 +16,6 @@ import {
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
 import {
-  RecordingPresets,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
   useAudioRecorder,
@@ -36,17 +35,19 @@ import {
 import type { LatLng } from "react-native-maps";
 import { GoogleRouteMap } from "../components/GoogleRouteMap";
 import { StackHeader } from "../components/StackHeader";
-import { speakToUser, clearSpeechQueue } from "../services/voiceFeedback";
-import { streamRecordingForTranscription } from "../services/voiceTranscription";
+import { speakToUser, clearSpeechQueue, prefetchAudio } from "../services/voiceFeedback";
+import {
+  SPEECH_RECORDING_OPTIONS,
+  transcribeWithCues,
+} from "../services/voiceTranscription";
 import {
   fetchRouteFromBackend,
+  rememberPreviewRoute,
   type RoutePayload,
 } from "../services/navigationRoute";
 import {
   announceMicStartBeep,
-  announceMicStopBeep,
   announceNavigationStarted,
-  announceProcessing,
 } from "../services/footstepAudio";
 import type { GeoCoordinates } from "../types";
 
@@ -201,7 +202,7 @@ export function RoutePreviewScreen({
   const isTransitioningRef = useRef(false);
   const isMountedRef = useRef(true);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorder = useAudioRecorder(SPEECH_RECORDING_OPTIONS);
 
   useEffect(() => {
     if (!currentCoordinate && locationError) {
@@ -401,9 +402,7 @@ export function RoutePreviewScreen({
       });
       setIsListening(false);
       Vibration.vibrate([0, 20, 40, 20]);
-      await announceMicStopBeep();
       setVoiceStatus("Processing...");
-      await announceProcessing();
 
       const recordingUri = safeGetRecordingUri();
       if (!recordingUri) {
@@ -412,7 +411,7 @@ export function RoutePreviewScreen({
       }
 
       setVoiceStatus("");
-      const result = await streamRecordingForTranscription(
+      const result = await transcribeWithCues(
         recordingUri,
         (partial) => {
           setVoiceStatus("");
@@ -515,12 +514,19 @@ export function RoutePreviewScreen({
           routeRequestRef.current.destination === destination
         ) {
           setRoutePayload(payload);
+          rememberPreviewRoute(destination, payload);
 
           const durationText = formatDuration(payload.estimated_duration_seconds);
           const stepsText = `${payload.steps.length} steps`;
-          const initialText = `Route preview ready for ${destination}. It is a ${stepsText} walk, taking about ${durationText}. Please say yes to begin navigation, or cancel to go back.`;
 
-          await speakToUser(initialText);
+          await speakToUser(`Route preview ready for ${destination}.`);
+          await speakToUser(`It is a ${stepsText} walk, taking about ${durationText}.`);
+          await speakToUser("Please say yes to begin navigation, or cancel to go back.");
+
+          // First steps are identical on the navigation screens — warm their audio now.
+          payload.steps.slice(0, 2).forEach((step) =>
+            void prefetchAudio(cleanAccessibilityInstruction(step.instruction)),
+          );
 
           if (
             isMountedRef.current &&

@@ -78,18 +78,18 @@ export async function prefetchAudio(message: string): Promise<void> {
     const response = await expoFetch(BACKEND_ENDPOINTS.ttsUrl, {
       method: "POST",
       headers: {
-        Accept: "audio/wav",
+        Accept: "audio/mpeg",
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         text,
-        format: "wav",
+        format: "mp3",
       }),
     });
 
     if (response.ok) {
       const bytes = await response.bytes();
-      const file = new File(Paths.cache, "campus-voice", `tts-cache-${key}.wav`);
+      const file = new File(Paths.cache, "campus-voice", `tts-cache-${key}.mp3`);
       file.create({ intermediates: true, overwrite: true });
       file.write(bytes);
       ttsCache.set(text, file.uri);
@@ -113,12 +113,12 @@ async function playBackendTts(message: string): Promise<boolean> {
     const response = await expoFetch(BACKEND_ENDPOINTS.ttsUrl, {
       method: "POST",
       headers: {
-        Accept: "audio/wav",
+        Accept: "audio/mpeg",
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         text: message,
-        format: "wav",
+        format: "mp3",
       }),
     });
 
@@ -136,7 +136,7 @@ async function playBackendTts(message: string): Promise<boolean> {
       return true;
     }
 
-    const file = new File(Paths.cache, "campus-voice", "tts-latest.wav");
+    const file = new File(Paths.cache, "campus-voice", "tts-latest.mp3");
     file.create({ intermediates: true, overwrite: true });
     file.write(bytes);
     fileUri = file.uri;

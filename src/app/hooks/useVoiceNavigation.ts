@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Vibration } from "react-native";
 import {
-  RecordingPresets,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
   useAudioRecorder,
 } from "expo-audio";
 import { speakToUser, clearSpeechQueue } from "../services/voiceFeedback";
-import { streamRecordingForTranscription } from "../services/voiceTranscription";
+import {
+  SPEECH_RECORDING_OPTIONS,
+  transcribeWithCues,
+} from "../services/voiceTranscription";
 import {
   announceError,
   announceMicStartBeep,
-  announceMicStopBeep,
-  announceProcessing,
 } from "../services/footstepAudio";
 import {
   rankCampusLocations,
@@ -105,7 +105,7 @@ export function useVoiceNavigation({
   const isTransitioningRef = useRef(false);
   const voiceStageRef = useRef<VoiceStage>("awaitingDestination");
   const pendingChoicesRef = useRef<PendingDestinationChoice[]>([]);
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorder = useAudioRecorder(SPEECH_RECORDING_OPTIONS);
   const isMountedRef = useRef(true);
 
   const clearPendingTimeouts = useCallback(() => {
@@ -336,8 +336,6 @@ export function useVoiceNavigation({
         interruptionMode: "doNotMix",
       });
       setIsListening(false);
-      await announceMicStopBeep();
-      await announceProcessing();
 
       const recordingUri = safeGetRecordingUri();
 
@@ -346,7 +344,7 @@ export function useVoiceNavigation({
         return;
       }
 
-      const result = await streamRecordingForTranscription(
+      const result = await transcribeWithCues(
         recordingUri,
         (partialText) => {
           setTranscript("");

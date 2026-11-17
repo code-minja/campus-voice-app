@@ -1,5 +1,8 @@
+import { RecordingPresets } from "expo-audio";
 import { File } from "expo-file-system";
 import { fetch } from "expo/fetch";
+import { announceMicStopBeep, announceProcessing } from "./footstepAudio";
+import { stopAudio } from "./preRecordedAudio";
 import {
   BACKEND_ENDPOINTS,
   getBackendErrorMessage,
@@ -11,6 +14,15 @@ export type TranscriptionResult = {
 };
 
 type TranscriptionStreamCallback = (partialText: string) => void;
+
+// Whisper resamples to 16 kHz mono anyway — capture at that rate to cut
+// recording size and upload time.
+export const SPEECH_RECORDING_OPTIONS = {
+  ...RecordingPresets.HIGH_QUALITY,
+  sampleRate: 16000,
+  numberOfChannels: 1,
+  bitRate: 32000,
+};
 
 const TRANSCRIPTION_ENDPOINT = BACKEND_ENDPOINTS.transcribeUrl;
 
@@ -94,4 +106,25 @@ export async function streamRecordingForTranscription(
   onPartial("Transcribing your speech...");
   const result = await sendRecordingForTranscription(recordingUri);
   return result;
+}
+
+/**
+ * Fire the mic-stop/processing cues without delaying the upload. Cues are
+ * skipped if the transcription finishes before they are due.
+ */
+export async function transcribeWithCues(
+  recordingUri: string,
+  onPartial: TranscriptionStreamCallback,
+): Promise<TranscriptionResult> {
+  let finished = false;
+  void (async () => {
+    await announceMicStopBeep();
+    if (!finished) await announceProcessing();
+  })();
+  try {
+    return await streamRecordingForTranscription(recordingUri, onPartial);
+  } finally {
+    finished = true;
+    await stopAudio();
+  }
 }
