@@ -87,3 +87,19 @@ export async function fetchRouteFromBackend(
   const data = (await response.json());
   return data as RoutePayload;
 }
+
+// Short-lived reuse of the preview route so navigation screens don't pay for
+// a second Google Routes call right after the user confirms.
+let previewRoute: { destination: string; payload: RoutePayload; at: number } | null = null;
+
+export function rememberPreviewRoute(destination: string, payload: RoutePayload) {
+  previewRoute = { destination, payload, at: Date.now() };
+}
+
+export function getPreviewRoute(destination: string, maxAgeMs = 120_000): RoutePayload | null {
+  return previewRoute &&
+    previewRoute.destination === destination &&
+    Date.now() - previewRoute.at <= maxAgeMs
+    ? previewRoute.payload
+    : null;
+}

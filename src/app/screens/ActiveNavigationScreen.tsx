@@ -20,6 +20,7 @@ import { GoogleRouteMap } from "../components/GoogleRouteMap";
 import { VoiceButton } from "../components/VoiceButton";
 import {
   fetchRouteFromBackend,
+  getPreviewRoute,
   type RoutePayload,
 } from "../services/navigationRoute";
 import type { GeoCoordinates } from "../types";
@@ -440,7 +441,9 @@ export function ActiveNavigationScreen({
     void (async () => {
       try {
         setRouteLoadError("");
-        const payload = await fetchRouteFromBackend(currentCoordinate, destination);
+        const payload =
+          (routeRetryCount === 0 ? getPreviewRoute(destination) : null) ??
+          (await fetchRouteFromBackend(currentCoordinate, destination));
         if (
           isMountedRef.current &&
           routeRequestRef.current.destination === destination

@@ -4,7 +4,11 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { Mic, Smartphone, Square } from "lucide-react-native";
 import { speakToUser, clearSpeechQueue, prefetchAudio } from "../services/voiceFeedback";
 import { cleanAccessibilityInstruction } from "./RoutePreviewScreen";
-import { fetchRouteFromBackend, type RoutePayload } from "../services/navigationRoute";
+import {
+  fetchRouteFromBackend,
+  getPreviewRoute,
+  type RoutePayload,
+} from "../services/navigationRoute";
 import type { GeoCoordinates } from "../types";
 import { useNavigation } from "@react-navigation/native";
 import { type NativeStackNavigationProp } from "@react-navigation/native-stack";
@@ -113,7 +117,9 @@ export function VoiceOnlyModeScreen({
     void (async () => {
       try {
         setRouteLoadError("");
-        const payload = await fetchRouteFromBackend(currentCoordinate, destination);
+        const payload =
+          getPreviewRoute(destination) ??
+          (await fetchRouteFromBackend(currentCoordinate, destination));
         if (
           isMountedRef.current &&
           routeRequestRef.current.destination === destination
