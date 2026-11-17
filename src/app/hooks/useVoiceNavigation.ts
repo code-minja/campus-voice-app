@@ -32,6 +32,12 @@ type UseVoiceNavigationResult = {
 
 const AUTO_STOP_RECORDING_MS = 6000;
 
+const RECORDING_AUDIO_MODE = {
+  allowsRecording: true,
+  playsInSilentMode: true,
+  interruptionMode: "doNotMix" as const,
+};
+
 type VoiceStage = "awaitingDestination" | "confirmingDestination" | "choosingDestination";
 
 type PendingDestinationChoice = {
@@ -169,14 +175,22 @@ export function useVoiceNavigation({
         return;
       }
 
-      await setAudioModeAsync({
-        allowsRecording: true,
-        playsInSilentMode: true,
-        interruptionMode: "doNotMix",
-      });
-
+      await setAudioModeAsync(RECORDING_AUDIO_MODE);
       await recorder.prepareToRecordAsync();
-      await recorder.record();
+
+      // Another audio player can change the session while the recorder is
+      // prepared. Re-apply the mode right before record() because iOS checks
+      // the recorder's flag at that moment.
+      await setAudioModeAsync(RECORDING_AUDIO_MODE);
+      try {
+        recorder.record();
+      } catch {
+        // Recovery for "recording not allowed on iOS": re-prepare with the
+        // recording-capable session and try once more.
+        await setAudioModeAsync(RECORDING_AUDIO_MODE);
+        await recorder.prepareToRecordAsync();
+        recorder.record();
+      }
       setIsListening(true);
       if (playListeningCue) {
         void announceMicStartBeep();

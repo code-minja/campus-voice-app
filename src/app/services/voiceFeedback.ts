@@ -142,8 +142,10 @@ async function playBackendTts(message: string): Promise<boolean> {
     fileUri = file.uri;
   }
 
+  // Keep recording enabled in the audio session: disabling it here would
+  // race with the mic restart that immediately follows spoken prompts.
   await setAudioModeAsync({
-    allowsRecording: false,
+    allowsRecording: true,
     playsInSilentMode: true,
     interruptionMode: "doNotMix",
   });
