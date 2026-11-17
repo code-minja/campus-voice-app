@@ -60,6 +60,11 @@ export default function App() {
     setSavedLocations((prev) => [...prev, newLocation]);
   };
 
+  // Remounting Home replays the welcome prompt and starts a fresh voice session.
+  const restartHomeSession = () => {
+    setHomeSessionVersion((prev) => prev + 1);
+  };
+
   useEffect(() => {
     preloadAudioAssets().catch((error) => {
       console.warn("Failed to preload audio:", error);
@@ -185,7 +190,7 @@ export default function App() {
                   })
                 }
                 onCancelVoiceConfirmation={() => {
-                  setHomeSessionVersion((prev) => prev + 1);
+                  restartHomeSession();
                   navigation.popToTop();
                 }}
               />
@@ -199,7 +204,10 @@ export default function App() {
                 currentLocation={currentLocationLabel}
                 currentCoordinate={currentCoordinates}
                 locationAccuracyMeters={accuracyMeters}
-                onEndNavigation={() => navigation.popToTop()}
+                onEndNavigation={() => {
+                  restartHomeSession();
+                  navigation.popToTop();
+                }}
                 onSwitchToVoiceOnly={() =>
                   navigation.navigate("VoiceOnlyMode", {
                     destination: route.params.destination,
@@ -216,7 +224,10 @@ export default function App() {
                 currentLocation={currentLocationLabel}
                 currentCoordinate={currentCoordinates}
                 locationAccuracyMeters={accuracyMeters}
-                onEndNavigation={() => navigation.popToTop()}
+                onEndNavigation={() => {
+                  restartHomeSession();
+                  navigation.popToTop();
+                }}
               />
             )}
           </Stack.Screen>
@@ -227,7 +238,10 @@ export default function App() {
                 destination={route.params.destination}
                 durationSeconds={route.params.durationSeconds}
                 distanceMeters={route.params.distanceMeters}
-                onFinish={() => navigation.popToTop()}
+                onFinish={() => {
+                  restartHomeSession();
+                  navigation.popToTop();
+                }}
               />
             )}
           </Stack.Screen>
