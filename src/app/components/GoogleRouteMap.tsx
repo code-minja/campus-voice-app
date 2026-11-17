@@ -136,6 +136,13 @@ export function GoogleRouteMap({
     );
   }, [isMapReady]);
 
+  const previewHeading = useMemo(() => {
+    if (routeCoordinates.length >= 2) {
+      return getBearing(routeCoordinates[0], routeCoordinates[1]);
+    }
+    return 0;
+  }, [routeCoordinates]);
+
   useEffect(() => {
     if (!mapRef.current || !isMapReady) {
       return;
@@ -156,22 +163,63 @@ export function GoogleRouteMap({
       return;
     }
 
+    if (mode === "preview" && !isUserTracking) {
+      return;
+    }
+
     if (mode === "preview" && routeWaypoints && routeWaypoints.length >= 2) {
       mapRef.current.fitToCoordinates(routeCoordinates, {
-        edgePadding: { top: 90, right: 60, bottom: 220, left: 60 },
+        edgePadding: { top: 90, right: 60, bottom: 260, left: 60 },
         animated: true,
       });
+      // Orient preview map toward the route direction after fitting.
+      setTimeout(() => {
+        if (!mapRef.current || !isUserTracking) return;
+        mapRef.current.animateCamera(
+          {
+            heading: previewHeading,
+            pitch: 0,
+          },
+          { duration: 350 },
+        );
+      }, 350);
+      return;
     }
-  }, [currentCoordinate, mode, routeCoordinates, routeWaypoints, currentHeading, isUserTracking, isMapReady]);
+
+    if (mode === "preview") {
+      mapRef.current.animateCamera(
+        {
+          center: {
+            latitude: startCoordinate.latitude,
+            longitude: startCoordinate.longitude,
+          },
+          heading: previewHeading,
+          pitch: 0,
+          zoom: 17,
+        },
+        { duration: 300 },
+      );
+    }
+  }, [
+    currentCoordinate,
+    mode,
+    routeCoordinates,
+    routeWaypoints,
+    currentHeading,
+    isUserTracking,
+    isMapReady,
+    previewHeading,
+    startCoordinate,
+  ]);
 
   return (
     <View style={styles.root} pointerEvents="box-none">
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFill}
-        provider={Platform.OS === "web" ? undefined : PROVIDER_GOOGLE}
+        provider={Platform.OS === "android" ? PROVIDER_GOOGLE : undefined}
         initialRegion={region}
-        mapType="satellite"
+        mapType={Platform.OS === "android" ? "satellite" : "standard"}
         minZoomLevel={14}
         maxZoomLevel={20}
         scrollEnabled
@@ -241,22 +289,55 @@ export function GoogleRouteMap({
         ]}
       />
 
-      {mode === "active" && !isUserTracking && (
+      {!isUserTracking && (
         <Pressable
           style={styles.recenterButton}
           onPress={() => {
             setIsUserTracking(true);
-            if (currentCoordinate && mapRef.current) {
-              mapRef.current.animateCamera({
-                center: {
-                  latitude: currentCoordinate.latitude,
-                  longitude: currentCoordinate.longitude,
+            if (!mapRef.current) return;
+
+            if (mode === "active" && currentCoordinate) {
+              mapRef.current.animateCamera(
+                {
+                  center: {
+                    latitude: currentCoordinate.latitude,
+                    longitude: currentCoordinate.longitude,
+                  },
+                  heading: currentHeading,
+                  pitch: 45,
+                  zoom: 19,
                 },
-                heading: currentHeading,
-                pitch: 45,
-                zoom: 19,
-              }, { duration: 250 });
+                { duration: 250 },
+              );
+              return;
             }
+
+            if (routeWaypoints && routeWaypoints.length >= 2) {
+              mapRef.current.fitToCoordinates(routeCoordinates, {
+                edgePadding: { top: 90, right: 60, bottom: 260, left: 60 },
+                animated: true,
+              });
+              setTimeout(() => {
+                mapRef.current?.animateCamera(
+                  { heading: previewHeading, pitch: 0 },
+                  { duration: 300 },
+                );
+              }, 300);
+              return;
+            }
+
+            mapRef.current.animateCamera(
+              {
+                center: {
+                  latitude: startCoordinate.latitude,
+                  longitude: startCoordinate.longitude,
+                },
+                heading: previewHeading,
+                pitch: 0,
+                zoom: 17,
+              },
+              { duration: 250 },
+            );
           }}
         >
           <Navigation size={13} color="#22d3ee" fill="#22d3ee" style={styles.recenterIcon} />
